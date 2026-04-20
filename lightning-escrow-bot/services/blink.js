@@ -2,41 +2,16 @@
  * services/blink.js
  *
  * All interactions with the Blink Lightning API (https://dev.blink.sv).
- *
- * ARCHITECTURE OVERVIEW
- * ──────────────────────
- * Blink exposes a single GraphQL endpoint.  Every call in this file is a
- * thin wrapper that:
- *   1. Builds the GraphQL query/mutation string and variables object.
- *   2. POSTs to BLINK_GRAPHQL_ENDPOINT with the API key in the header.
- *   3. Checks for `errors` arrays at both the HTTP and GraphQL layer.
- *   4. Returns the relevant data object to the caller.
- *
- * WALLET ID CACHING
- * ──────────────────
- * The Blink API requires a `walletId` (UUID) for most mutations.  We fetch
- * it once at startup via `getBtcWalletId()` and cache it in module scope.
- * Call `initBlink()` from bot.js during startup before accepting any updates.
- *
- * PAYOUT STRATEGY (per spec)
- * ───────────────────────────
- * 1. Try to pay via the recipient's stored Lightning Address (user@domain.com).
- * 2. If that fails (address unreachable, insufficient liquidity, etc.), fall
- *    back to requesting a BOLT11 invoice from the user via Telegram and paying
- *    that instead.
- * The `payToLightningAddress` function implements step 1 and throws a
- * `LnAddressPayoutError` on failure so the caller can implement step 2.
+ * Now includes real-time fiat price fetching using currencyConversionEstimation.
  */
 
 'use strict';
 
 const { config } = require('../config/env');
 
-// node-fetch v3 is ESM-only; if you're on Node 18+ the built-in `fetch` is
-// available globally.  We fall back to the global gracefully.
 let fetchFn;
 try {
-  fetchFn = fetch; // Node 18+ built-in
+  fetchFn = fetch; 
 } catch {
   fetchFn = require('node-fetch');
 }
@@ -53,7 +28,6 @@ class BlinkApiError extends Error {
   }
 }
 
-/** Thrown when an LN Address payout fails — signals the bot to fall back to BOLT11. */
 class LnAddressPayoutError extends BlinkApiError {
   constructor(lnAddress, cause) {
     super(`LN Address payout to "${lnAddress}" failed: ${cause}`);
@@ -63,24 +37,20 @@ class LnAddressPayoutError extends BlinkApiError {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Module-level wallet ID cache
+// Module-level Cache
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** @type {string | null} */
 let _cachedBtcWalletId = null;
+
+// The Price Cache: Holds the price of 1 Satoshi in the target fiat currency.
+let _cachedFiatPerSat = null;
+let _lastPriceFetchTime = 0;
+const CACHE_TTL_MS = 30 * 1000; // 30 seconds
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal GraphQL transport
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Execute a GraphQL operation against the Blink API.
- *
- * @param {string}  document  - GraphQL query or mutation string.
- * @param {object}  variables - Variables object.
- * @returns {Promise<object>}  - The `data` field from the GraphQL response.
- * @throws {BlinkApiError}    - On HTTP errors or GraphQL-level errors.
- */
 async function blinkRequest(document, variables = {}) {
   let response;
   try {
@@ -88,7 +58,6 @@ async function blinkRequest(document, variables = {}) {
       method:  'POST',
       headers: {
         'Content-Type': 'application/json',
-        // Blink uses the `X-API-KEY` header for authentication.
         'X-API-KEY': config.BLINK_API_KEY,
       },
       body: JSON.stringify({ query: document, variables }),
@@ -98,9 +67,7 @@ async function blinkRequest(document, variables = {}) {
   }
 
   if (!response.ok) {
-    throw new BlinkApiError(
-      `Blink API HTTP ${response.status}: ${response.statusText}`
-    );
+    throw new BlinkApiError(`Blink API HTTP ${response.status}: ${response.statusText}`);
   }
 
   let json;
@@ -110,7 +77,6 @@ async function blinkRequest(document, variables = {}) {
     throw new BlinkApiError('Blink API returned non-JSON response.');
   }
 
-  // GraphQL spec: top-level `errors` array signals partial or total failure.
   if (json.errors && json.errors.length > 0) {
     const messages = json.errors.map((e) => e.message).join('; ');
     throw new BlinkApiError(`Blink GraphQL error: ${messages}`, json.errors);
@@ -123,16 +89,10 @@ async function blinkRequest(document, variables = {}) {
 // Wallet helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Query the Blink API for the BTC wallet ID associated with our API key.
- * Caches the result in module scope for the lifetime of the process.
- *
- * @returns {Promise<string>} - The BTC wallet UUID.
- */
 async function getBtcWalletId() {
   if (_cachedBtcWalletId) return _cachedBtcWalletId;
 
-  const data = await blinkRequest(/* GraphQL */ `
+  const data = await blinkRequest(`
     query Me {
       me {
         defaultAccount {
@@ -149,121 +109,126 @@ async function getBtcWalletId() {
   const btcWallet = wallets.find((w) => w.walletCurrency === 'BTC');
 
   if (!btcWallet) {
-    throw new BlinkApiError(
-      'No BTC wallet found on the Blink account associated with BLINK_API_KEY.'
-    );
+    throw new BlinkApiError('No BTC wallet found on the Blink account.');
   }
 
   _cachedBtcWalletId = btcWallet.id;
   return _cachedBtcWalletId;
 }
 
-/**
- * Initialise the Blink service.  Call this once at bot startup to warm the
- * wallet ID cache and surface API key problems early.
- *
- * @returns {Promise<void>}
- */
 async function initBlink() {
   const walletId = await getBtcWalletId();
   console.log(`[blink] Initialised. BTC Wallet ID: ${walletId}`);
+  try {
+    await getRealtimePrice('KES');
+    console.log(`[blink] Price cache warmed.`);
+  } catch (err) {
+    console.warn(`[blink] Failed to pre-warm price cache: ${err.message}`);
+  }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Real-time Pricing Engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getRealtimePrice(currency = 'KES') {
+  const now = Date.now();
+  
+  if (_cachedFiatPerSat && (now - _lastPriceFetchTime < CACHE_TTL_MS)) {
+    return _cachedFiatPerSat;
+  }
+
+  // We bypass confusing base/offset math and ask Blink explicitly: 
+  // "How many Sats is 1000 KES worth?"
+  const data = await blinkRequest(`
+    query Conversion($amount: Float!, $currency: DisplayCurrency!) {
+      currencyConversionEstimation(amount: $amount, currency: $currency) {
+        btcSatAmount
+      }
+    }
+  `, { amount: 1000, currency });
+
+  const satsFor1000 = data?.currencyConversionEstimation?.btcSatAmount;
+  if (!satsFor1000) {
+    throw new BlinkApiError('Failed to fetch conversion estimation from Blink.');
+  }
+
+  // fiatPerSat = KES per 1 Satoshi
+  const fiatPerSat = 1000 / satsFor1000;
+  
+  _cachedFiatPerSat = fiatPerSat;
+  _lastPriceFetchTime = now;
+
+  return fiatPerSat;
+}
+
+async function satsToKes(sats) {
+  const fiatPerSat = await getRealtimePrice('KES');
+  return Math.round(sats * fiatPerSat);
+}
+
+async function kesToSats(kes) {
+  const fiatPerSat = await getRealtimePrice('KES');
+  return Math.round(kes / fiatPerSat);
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Invoice creation
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Create a Lightning invoice on the Blink wallet for the given amount.
- * The buyer will pay this invoice to fund the escrow.
- *
- * @param {{
- *   amountSats:  number,  - Invoice amount in satoshis (trade amount + fee).
- *   memo:        string,  - Human-readable description shown on the invoice.
- *   expirySeconds?: number - Seconds until invoice expires (default: 3600 = 1 h).
- * }} params
- *
- * @returns {Promise<{
- *   paymentHash:    string,  - Unique identifier; stored in escrows.blink_payment_hash.
- *   paymentRequest: string,  - BOLT11 invoice string (lnbc…).
- *   expiresAt:      string,  - ISO-8601 expiry timestamp.
- * }>}
- */
-async function createLightningInvoice({ amountSats, memo, expirySeconds = 3600 }) {
+async function createLightningInvoice({ amountSats, memo }) {
   const walletId = await getBtcWalletId();
 
-  const data = await blinkRequest(/* GraphQL */ `
+  // We removed expiresIn from the input, and expiresAt from the response.
+  // Blink manages expiration times internally.
+  const data = await blinkRequest(`
     mutation LnInvoiceCreate($input: LnInvoiceCreateInput!) {
       lnInvoiceCreate(input: $input) {
         invoice {
           paymentHash
           paymentRequest
-          paymentSecret
-          satoshis
-          expiresAt
         }
         errors {
           message
-          code
-          path
         }
       }
     }
   `, {
     input: {
       walletId,
-      amount:      amountSats,
-      memo:        memo.slice(0, 100), // Blink enforces a memo length limit.
-      expiresIn:   expirySeconds,
+      amount: amountSats,
+      memo: memo.slice(0, 100),
     },
   });
 
   const result = data?.lnInvoiceCreate;
 
-  // Blink surfaces mutation-level errors inside the payload (not at top level).
   if (result?.errors?.length > 0) {
     const messages = result.errors.map((e) => e.message).join('; ');
     throw new BlinkApiError(`lnInvoiceCreate failed: ${messages}`, result.errors);
   }
 
-  const invoice = result?.invoice;
-  if (!invoice?.paymentRequest) {
-    throw new BlinkApiError('lnInvoiceCreate returned no invoice data.');
-  }
-
   return {
-    paymentHash:    invoice.paymentHash,
-    paymentRequest: invoice.paymentRequest,
-    expiresAt:      invoice.expiresAt,
+    paymentHash: result.invoice.paymentHash,
+    paymentRequest: result.invoice.paymentRequest,
   };
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Invoice status check
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Check whether a previously created invoice has been paid.
- * Used by the webhook/polling handler to confirm escrow funding.
- *
- * @param {string} paymentHash - The paymentHash from createLightningInvoice.
- * @returns {Promise<{
- *   status:      'PENDING' | 'PAID' | 'EXPIRED',
- *   amountPaid?: number,
- * }>}
- */
 async function getInvoiceStatus(paymentHash) {
   const walletId = await getBtcWalletId();
 
-  const data = await blinkRequest(/* GraphQL */ `
+  // Updated to use the correct 'invoiceByPaymentHash' field 
+  // and removed the unnecessary 'satoshis' field.
+  const data = await blinkRequest(`
     query InvoiceStatus($walletId: WalletId!, $paymentHash: PaymentHash!) {
       me {
         defaultAccount {
           walletById(walletId: $walletId) {
             ... on BTCWallet {
-              invoiceByHash(paymentHash: $paymentHash) {
+              invoiceByPaymentHash(paymentHash: $paymentHash) {
                 paymentStatus
-                satoshis
               }
             }
           }
@@ -272,51 +237,27 @@ async function getInvoiceStatus(paymentHash) {
     }
   `, { walletId, paymentHash });
 
-  const invoice = data?.me?.defaultAccount?.walletById?.invoiceByHash;
+  const invoice = data?.me?.defaultAccount?.walletById?.invoiceByPaymentHash;
   if (!invoice) throw new BlinkApiError(`Invoice not found for hash: ${paymentHash}`);
 
   return {
-    status:      invoice.paymentStatus, // 'PENDING' | 'PAID' | 'EXPIRED'
-    amountPaid:  invoice.satoshis ?? 0,
+    status: invoice.paymentStatus,
   };
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Payouts
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Pay a Lightning Address directly from the Blink wallet.
- *
- * This is the PRIMARY payout path (per spec).  On failure, the caller should
- * catch `LnAddressPayoutError` and fall back to requesting a BOLT11 invoice.
- *
- * Lightning Addresses follow the format user@domain.com and are resolved by
- * Blink to a BOLT11 invoice internally.
- *
- * @param {{
- *   lnAddress:   string,  - Recipient Lightning Address (user@domain.com).
- *   amountSats:  number,  - Amount to send in satoshis (after fee deduction).
- *   memo:        string,  - Payment memo / description.
- * }} params
- *
- * @returns {Promise<{
- *   status:        string,  - 'SUCCESS' | 'PENDING' | 'FAILURE'
- *   transactionId: string,
- * }>}
- * @throws {LnAddressPayoutError} If the payout fails for any reason.
- */
 async function payToLightningAddress({ lnAddress, amountSats, memo }) {
   const walletId = await getBtcWalletId();
 
-  // Basic LN address format validation before hitting the API.
   if (!lnAddress || !lnAddress.includes('@')) {
     throw new LnAddressPayoutError(lnAddress, 'Invalid Lightning Address format.');
   }
 
   let data;
   try {
-    data = await blinkRequest(/* GraphQL */ `
+    data = await blinkRequest(`
       mutation LnAddressPaymentSend($input: LnAddressPaymentSendInput!) {
         lnAddressPaymentSend(input: $input) {
           status
@@ -325,8 +266,6 @@ async function payToLightningAddress({ lnAddress, amountSats, memo }) {
           }
           errors {
             message
-            code
-            path
           }
         }
       }
@@ -335,12 +274,10 @@ async function payToLightningAddress({ lnAddress, amountSats, memo }) {
         walletId,
         lnAddress,
         amount: amountSats,
-        memo:   memo.slice(0, 100),
+        memo: memo.slice(0, 100),
       },
     });
   } catch (err) {
-    // Wrap any BlinkApiError in an LnAddressPayoutError so the caller sees
-    // exactly what type of failure this is and knows to try BOLT11 fallback.
     throw new LnAddressPayoutError(lnAddress, err.message);
   }
 
@@ -356,33 +293,18 @@ async function payToLightningAddress({ lnAddress, amountSats, memo }) {
   }
 
   return {
-    status:        result.status,
+    status: result.status,
     transactionId: result.transaction?.id ?? 'unknown',
   };
 }
 
-/**
- * Pay a BOLT11 invoice from the Blink wallet.
- *
- * This is the FALLBACK payout path used when an LN Address payment fails.
- * The bot will have asked the recipient to supply this invoice via Telegram.
- *
- * @param {{
- *   paymentRequest: string,  - BOLT11 invoice (lnbc…).
- *   memo:           string,
- * }} params
- *
- * @returns {Promise<{
- *   status:        string,
- *   transactionId: string,
- * }>}
- * @throws {BlinkApiError}
- */
 async function payBolt11Invoice({ paymentRequest, memo }) {
   const walletId = await getBtcWalletId();
 
-  const data = await blinkRequest(/* GraphQL */ `
-    mutation LnInvoicePaymentSend($input: LnInvoicePaymentSendInput!) {
+  // We changed the input type to LnInvoicePaymentInput 
+  // and removed the memo from the variables to satisfy the Blink schema.
+  const data = await blinkRequest(`
+    mutation LnInvoicePaymentSend($input: LnInvoicePaymentInput!) {
       lnInvoicePaymentSend(input: $input) {
         status
         transaction {
@@ -390,8 +312,6 @@ async function payBolt11Invoice({ paymentRequest, memo }) {
         }
         errors {
           message
-          code
-          path
         }
       }
     }
@@ -399,7 +319,6 @@ async function payBolt11Invoice({ paymentRequest, memo }) {
     input: {
       walletId,
       paymentRequest,
-      memo: memo.slice(0, 100),
     },
   });
 
@@ -415,7 +334,7 @@ async function payBolt11Invoice({ paymentRequest, memo }) {
   }
 
   return {
-    status:        result.status,
+    status: result.status,
     transactionId: result.transaction?.id ?? 'unknown',
   };
 }
@@ -433,4 +352,7 @@ module.exports = {
   getInvoiceStatus,
   payToLightningAddress,
   payBolt11Invoice,
+  getRealtimePrice,
+  satsToKes,
+  kesToSats,
 };

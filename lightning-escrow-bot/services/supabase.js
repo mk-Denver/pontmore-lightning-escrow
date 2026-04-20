@@ -119,7 +119,7 @@ class NotFoundError extends Error {
  */
 const VALID_TRANSITIONS = Object.freeze({
   CREATED:         ['PENDING_FUNDING', 'CANCELLED'],
-  PENDING_FUNDING: ['FUNDED', 'CANCELLED'],
+  PENDING_FUNDING: ['PENDING_FUNDING', 'FUNDED', 'CANCELLED'],
   FUNDED:          ['SETTLED', 'DISPUTED', 'CANCELLED'],
   DISPUTED:        ['SETTLED', 'CANCELLED'],
   SETTLED:         [], // terminal

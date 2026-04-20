@@ -2,30 +2,7 @@
  * bot.js
  *
  * Entry point for the Telegram Lightning Escrow Bot.
- *
- * WHAT THIS FILE OWNS
- * ────────────────────
- * 1.  Express HTTP server (Telegram webhook + health check endpoint).
- * 2.  Telegraf bot instance with middleware pipeline.
- * 3.  Deep-link interception:  /start escrow_<UUID>  →  join-escrow flow.
- * 4.  Main menu for authenticated users.
- * 5.  Full escrow lifecycle handlers (inline keyboards, conversation state).
- * 6.  Admin dispute dossier routing.
- * 7.  QR code generation for Lightning invoices (local buffer, no external API).
- *
- * WEBHOOK SECURITY
- * ─────────────────
- * Telegram signs every webhook POST with a `X-Telegram-Bot-Api-Secret-Token`
- * header.  The `webhookSecretToken` option in Telegraf validates this header
- * automatically before the update reaches any handler.
- *
- * CONVERSATION STATE
- * ───────────────────
- * Instead of a full scene/stage library we use a lightweight in-memory state
- * map (`conversationState`) keyed by Telegram user ID.  Each entry holds the
- * current step name and any partial data collected so far.  This is fine for
- * a single-process deployment on Railway.  If you need multi-instance support,
- * replace the map with a Redis-backed store.
+ * System-wide Markdown Sanitization Applied.
  */
 
 'use strict';
@@ -60,39 +37,36 @@ const {
   payToLightningAddress,
   payBolt11Invoice,
   LnAddressPayoutError,
+  satsToKes,
+  kesToSats,
 } = require('./services/blink');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Constants
+// Constants & Utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The URL path where Telegram will POST updates. Keep this secret-ish. */
 const WEBHOOK_PATH = `/telegram/${config.TELEGRAM_BOT_TOKEN.replace(':', '_')}`;
-
-/** Deep-link prefix used in invite URLs. */
 const DEEP_LINK_PREFIX = 'escrow_';
+
+/**
+ * Escapes characters that Telegram's Markdown (v1) parser treats as formatting.
+ * Prevents "Can't find end of the entity" crashes from user input.
+ */
+function escapeMd(text) {
+  if (!text) return '';
+  return String(text).replace(/([_*`\[])/g, '\\$1');
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory conversation state store
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Map<telegramId (string), ConversationState>
- *
- * @typedef {{
- *   step:        string,
- *   data:        object,
- *   escrowId?:   string,
- * }} ConversationState
- */
 const conversationState = new Map();
 
-/** Clear a user's conversation state (call after a flow completes or errors). */
 function clearState(telegramId) {
   conversationState.delete(String(telegramId));
 }
 
-/** Set the next step + optional data merge for a user. */
 function setState(telegramId, step, data = {}) {
   const existing = conversationState.get(String(telegramId)) ?? { data: {} };
   conversationState.set(String(telegramId), {
@@ -101,7 +75,6 @@ function setState(telegramId, step, data = {}) {
   });
 }
 
-/** Retrieve the current state for a user (or null). */
 function getState(telegramId) {
   return conversationState.get(String(telegramId)) ?? null;
 }
@@ -111,7 +84,6 @@ function getState(telegramId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const bot = new Telegraf(config.TELEGRAM_BOT_TOKEN, {
-  // Explicitly disable long-polling — this bot is webhook-only.
   telegram: { webhookReply: true },
 });
 
@@ -125,7 +97,6 @@ bot.use(async (ctx, next) => {
       await upsertUser(ctx.from.id, ctx.from.username);
     } catch (err) {
       console.error('[middleware] upsertUser failed:', err.message);
-      // Non-fatal — continue anyway.
     }
   }
   return next();
@@ -135,10 +106,6 @@ bot.use(async (ctx, next) => {
 // Helper: send the main menu
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Render the main menu to a user.
- * @param {import('telegraf').Context} ctx
- */
 async function sendMainMenu(ctx) {
   await ctx.reply(
     '⚡ *Lightning Escrow Bot*\n\nSecure, trustless escrow powered by the Bitcoin Lightning Network.',
@@ -159,18 +126,17 @@ async function sendMainMenu(ctx) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 bot.start(async (ctx) => {
-  const payload = ctx.startPayload; // text after /start, e.g. "escrow_<UUID>"
+  const payload = ctx.startPayload; 
 
-  // ── Deep-link: user followed an invite link ────────────────────────────────
   if (payload && payload.startsWith(DEEP_LINK_PREFIX)) {
     const escrowId = payload.slice(DEEP_LINK_PREFIX.length);
     return handleEscrowInvite(ctx, escrowId);
   }
 
-  // ── Normal /start ─────────────────────────────────────────────────────────
   clearState(ctx.from.id);
+  const safeName = escapeMd(ctx.from.first_name);
   await ctx.reply(
-    `👋 Welcome${ctx.from.first_name ? `, ${ctx.from.first_name}` : ''}!`,
+    `👋 Welcome${safeName ? `, ${safeName}` : ''}!`,
     { parse_mode: 'Markdown' }
   );
   return sendMainMenu(ctx);
@@ -180,12 +146,6 @@ bot.start(async (ctx) => {
 // Deep-link: join an existing escrow as the counterparty
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Handle a user arriving via an invite deep link.
- *
- * @param {import('telegraf').Context} ctx
- * @param {string} escrowId - UUID parsed from the start payload.
- */
 async function handleEscrowInvite(ctx, escrowId) {
   try {
     const escrow = await getEscrowById(escrowId);
@@ -200,18 +160,21 @@ async function handleEscrowInvite(ctx, escrowId) {
       return ctx.reply('⚠️ This escrow already has a counterparty.');
     }
 
-    // Determine the role the invitee takes (opposite of creator).
     const inviteeRole = escrow.creator_role === 'Buyer' ? 'Seller' : 'Buyer';
-    const creatorHandle = escrow.creator?.username
+    const creatorHandle = escapeMd(escrow.creator?.username
       ? `@${escrow.creator.username}`
-      : `User ${escrow.creator_id}`;
+      : `User ${escrow.creator_id}`);
+    
+    const safeDesc = escapeMd(escrow.trade_description);
+    const amountKes = await satsToKes(escrow.amount_sats);
+    const feeKes = await satsToKes(escrow.platform_fee_sats);
 
     await ctx.reply(
       `📩 *Escrow Invite*\n\n` +
       `You have been invited to join an escrow as the *${inviteeRole}*.\n\n` +
-      `*Trade:* ${escrow.trade_description}\n` +
-      `*Amount:* ${escrow.amount_sats.toLocaleString()} sats\n` +
-      `*Platform Fee:* ${escrow.platform_fee_sats.toLocaleString()} sats\n` +
+      `*Trade:* ${safeDesc}\n` +
+      `*Amount:* ${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()})\n` +
+      `*Platform Fee:* ${escrow.platform_fee_sats.toLocaleString()} sats (~KES ${feeKes.toLocaleString()})\n` +
       `*Created by:* ${creatorHandle}\n\n` +
       `Do you want to accept this trade?`,
       {
@@ -252,8 +215,6 @@ bot.action('menu:help', async (ctx) => {
   );
 });
 
-// ── Set Lightning Address ─────────────────────────────────────────────────────
-
 bot.action('menu:set_ln_address', async (ctx) => {
   await ctx.answerCbQuery();
   setState(ctx.from.id, 'AWAITING_LN_ADDRESS');
@@ -263,8 +224,6 @@ bot.action('menu:set_ln_address', async (ctx) => {
     { parse_mode: 'Markdown' }
   );
 });
-
-// ── New Escrow flow  ──────────────────────────────────────────────────────────
 
 bot.action('menu:new_escrow', async (ctx) => {
   await ctx.answerCbQuery();
@@ -289,7 +248,7 @@ bot.action(/^escrow:role:(Buyer|Seller)$/, async (ctx) => {
   const role = ctx.match[1];
   setState(ctx.from.id, 'ESCROW_AWAITING_AMOUNT', { role });
   await ctx.reply(
-    `✅ Role set: *${role}*\n\nHow many satoshis is this trade for?\n_(Send a number, e.g. \`50000\`)_`,
+    `✅ Role set: *${role}*\n\nHow much is this trade for in KES?\n_(Just send the number, e.g. \`5000\`)_`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -300,8 +259,6 @@ bot.action('escrow:cancel', async (ctx) => {
   await ctx.reply('❌ Escrow creation cancelled.');
   return sendMainMenu(ctx);
 });
-
-// ── My Escrows ─────────────────────────────────────────────────────────────────
 
 bot.action('menu:my_escrows', async (ctx) => {
   await ctx.answerCbQuery();
@@ -319,9 +276,11 @@ bot.action('menu:my_escrows', async (ctx) => {
       return ctx.reply("You don't have any escrows yet. Create one with /start!");
     }
 
-    const lines = escrows.map((e) =>
-      `• \`${e.escrow_id.slice(0, 8)}…\` | ${e.state} | ${e.amount_sats} sats`
-    );
+    const lines = await Promise.all(escrows.map(async (e) => {
+      const kes = await satsToKes(e.amount_sats);
+      return `• \`${e.escrow_id.slice(0, 8)}…\` | ${e.state} | ${e.amount_sats.toLocaleString()} sats (~KES ${kes.toLocaleString()})`;
+    }));
+
     await ctx.reply(
       `📋 *Your Recent Escrows*\n\n${lines.join('\n')}`,
       { parse_mode: 'Markdown' }
@@ -341,47 +300,42 @@ bot.action(/^invite:accept:(.+)$/, async (ctx) => {
   const escrowId = ctx.match[1];
 
   try {
-    // Atomically set the invitee.
     await setEscrowInvitee(escrowId, ctx.from.id);
-
-    // Transition escrow to PENDING_FUNDING.
     const escrow = await transitionEscrowState(escrowId, 'CREATED', 'PENDING_FUNDING');
 
-    // Determine who is the buyer (the one who pays the invoice).
-    const buyerTelegramId =
-      escrow.creator_role === 'Buyer' ? escrow.creator_id : escrow.invitee_id;
-
+    const buyerTelegramId = escrow.creator_role === 'Buyer' ? escrow.creator_id : escrow.invitee_id;
     const totalSats = escrow.amount_sats + escrow.platform_fee_sats;
 
-    // Generate the invoice on the Blink wallet.
     const { paymentHash, paymentRequest } = await createLightningInvoice({
       amountSats: totalSats,
       memo: `Escrow ${escrowId.slice(0, 8)} — ${escrow.trade_description}`,
     });
 
-    // Persist the payment hash so we can check payment status later.
     await transitionEscrowState(escrowId, 'PENDING_FUNDING', 'PENDING_FUNDING', {
       blink_payment_hash: paymentHash,
     });
 
-    // Generate QR code as an image buffer (no external API).
     const qrBuffer = await QRCode.toBuffer(paymentRequest.toUpperCase(), {
-      type:         'png',
+      type: 'png',
       errorCorrectionLevel: 'M',
-      margin:       2,
-      width:        512,
+      margin: 2,
+      width: 512,
     });
+
+    const safeDesc = escapeMd(escrow.trade_description);
+    const amountKes = await satsToKes(escrow.amount_sats);
+    const feeKes = await satsToKes(escrow.platform_fee_sats);
+    const totalKes = await satsToKes(totalSats);
 
     const invoiceMessage =
       `⚡ *Escrow Funded — Invoice Ready*\n\n` +
-      `*Trade:* ${escrow.trade_description}\n` +
-      `*Amount:* ${escrow.amount_sats.toLocaleString()} sats\n` +
-      `*Fee:* ${escrow.platform_fee_sats.toLocaleString()} sats\n` +
-      `*Total to Pay:* ${totalSats.toLocaleString()} sats\n\n` +
+      `*Trade:* ${safeDesc}\n` +
+      `*Amount:* ${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()})\n` +
+      `*Fee:* ${escrow.platform_fee_sats.toLocaleString()} sats (~KES ${feeKes.toLocaleString()})\n` +
+      `*Total to Pay:* ${totalSats.toLocaleString()} sats (~KES ${totalKes.toLocaleString()})\n\n` +
       `Scan the QR code or copy the invoice below:\n\n` +
       `\`${paymentRequest}\``;
 
-    // Notify the buyer with the invoice and QR code.
     await bot.telegram.sendPhoto(
       buyerTelegramId,
       { source: qrBuffer },
@@ -394,7 +348,6 @@ bot.action(/^invite:accept:(.+)$/, async (ctx) => {
       }
     );
 
-    // Notify the invitee (this user) that they've joined.
     await ctx.editMessageText(
       `✅ *You've joined the escrow as ${escrow.creator_role === 'Buyer' ? 'Seller' : 'Buyer'}.*\n\n` +
       `The buyer has been sent the payment invoice.\n` +
@@ -402,10 +355,10 @@ bot.action(/^invite:accept:(.+)$/, async (ctx) => {
       { parse_mode: 'Markdown' }
     );
 
-    // Also notify the creator (if they're the seller, they wait; if buyer, they pay).
     const notifyId = buyerTelegramId === String(escrow.creator_id)
-      ? escrow.invitee_id  // creator is buyer — already notified above
-      : escrow.creator_id; // creator is seller — tell them buyer got the invoice
+      ? escrow.invitee_id 
+      : escrow.creator_id; 
+
     if (notifyId && notifyId !== buyerTelegramId) {
       await bot.telegram.sendMessage(
         notifyId,
@@ -446,7 +399,6 @@ bot.action(/^check:(.+)$/, async (ctx) => {
     const { status } = await getInvoiceStatus(escrow.blink_payment_hash);
 
     if (status === 'PAID') {
-      // Atomic transition to FUNDED.
       await transitionEscrowState(escrowId, 'PENDING_FUNDING', 'FUNDED');
       await notifyEscrowFunded(escrow);
       return ctx.reply('✅ *Payment confirmed! Escrow is now FUNDED.*', { parse_mode: 'Markdown' });
@@ -457,7 +409,6 @@ bot.action(/^check:(.+)$/, async (ctx) => {
       return ctx.reply('⏰ Invoice has expired. The escrow has been cancelled.');
     }
 
-    // Still pending.
     await ctx.reply(
       '⏳ Payment not yet received. Please pay the invoice and check again.',
       Markup.inlineKeyboard([
@@ -470,15 +421,12 @@ bot.action(/^check:(.+)$/, async (ctx) => {
   }
 });
 
-/**
- * Notify both parties that the escrow has been funded and is awaiting delivery.
- * @param {object} escrow - Full escrow row with joined user data.
- */
 async function notifyEscrowFunded(escrow) {
-  const sellerTelegramId =
-    escrow.creator_role === 'Seller' ? escrow.creator_id : escrow.invitee_id;
-  const buyerTelegramId =
-    escrow.creator_role === 'Buyer'  ? escrow.creator_id : escrow.invitee_id;
+  const sellerTelegramId = escrow.creator_role === 'Seller' ? escrow.creator_id : escrow.invitee_id;
+  const buyerTelegramId = escrow.creator_role === 'Buyer' ? escrow.creator_id : escrow.invitee_id;
+
+  const amountKes = await satsToKes(escrow.amount_sats);
+  const safeDesc = escapeMd(escrow.trade_description);
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback('✅ Release Funds', `release:${escrow.escrow_id}`)],
@@ -488,8 +436,8 @@ async function notifyEscrowFunded(escrow) {
   await bot.telegram.sendMessage(
     buyerTelegramId,
     `✅ *Escrow Funded!*\n\n` +
-    `Trade: ${escrow.trade_description}\n` +
-    `Amount: ${escrow.amount_sats.toLocaleString()} sats\n\n` +
+    `Trade: ${safeDesc}\n` +
+    `Amount: ${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()})\n\n` +
     `Once you receive the goods/service, press *Release Funds*.\n` +
     `If there's an issue, press *Open Dispute*.`,
     { parse_mode: 'Markdown', ...keyboard }
@@ -498,8 +446,8 @@ async function notifyEscrowFunded(escrow) {
   await bot.telegram.sendMessage(
     sellerTelegramId,
     `✅ *Escrow is Funded!*\n\n` +
-    `Trade: ${escrow.trade_description}\n` +
-    `Amount: ${escrow.amount_sats.toLocaleString()} sats\n\n` +
+    `Trade: ${safeDesc}\n` +
+    `Amount: ${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()})\n\n` +
     `Please fulfil your end of the trade. The buyer will release funds when satisfied.`
   );
 }
@@ -515,9 +463,7 @@ bot.action(/^release:(.+)$/, async (ctx) => {
   try {
     const escrow = await getEscrowById(escrowId);
 
-    // Only the buyer can release funds.
-    const buyerTelegramId =
-      escrow.creator_role === 'Buyer' ? escrow.creator_id : escrow.invitee_id;
+    const buyerTelegramId = escrow.creator_role === 'Buyer' ? escrow.creator_id : escrow.invitee_id;
     if (String(ctx.from.id) !== String(buyerTelegramId)) {
       return ctx.answerCbQuery('Only the buyer can release funds.', { show_alert: true });
     }
@@ -526,19 +472,16 @@ bot.action(/^release:(.+)$/, async (ctx) => {
       return ctx.answerCbQuery(`Escrow is in state ${escrow.state}.`, { show_alert: true });
     }
 
-    // Atomic transition: FUNDED → SETTLED.
     await transitionEscrowState(escrowId, 'FUNDED', 'SETTLED');
 
-    // Look up the seller's Lightning Address.
-    const sellerTelegramId =
-      escrow.creator_role === 'Seller' ? escrow.creator_id : escrow.invitee_id;
+    const sellerTelegramId = escrow.creator_role === 'Seller' ? escrow.creator_id : escrow.invitee_id;
     const seller = await getUserByTelegramId(sellerTelegramId);
-
     const memo = `Escrow settlement: ${escrow.trade_description}`;
+    const amountKes = await satsToKes(escrow.amount_sats);
+    const safeDesc = escapeMd(escrow.trade_description);
 
     if (seller.default_ln_address) {
       try {
-        // Primary payout path: Lightning Address.
         await payToLightningAddress({
           lnAddress:  seller.default_ln_address,
           amountSats: escrow.amount_sats,
@@ -546,19 +489,20 @@ bot.action(/^release:(.+)$/, async (ctx) => {
         });
         await incrementCompletedTrades(String(escrow.creator_id));
         await incrementCompletedTrades(String(escrow.invitee_id));
+        
+        const safeLn = escapeMd(seller.default_ln_address);
         await ctx.editMessageText(
-          `✅ *Funds Released!*\n\n${escrow.amount_sats.toLocaleString()} sats sent to ${seller.default_ln_address}`,
+          `✅ *Funds Released!*\n\n${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()}) sent to ${safeLn}`,
           { parse_mode: 'Markdown' }
         );
         await bot.telegram.sendMessage(
           sellerTelegramId,
-          `🎉 *Payment received!*\n\n${escrow.amount_sats.toLocaleString()} sats have been sent to your Lightning Address.\n_Trade: ${escrow.trade_description}_`,
+          `🎉 *Payment received!*\n\n${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()}) have been sent to your Lightning Address.\n_Trade: ${safeDesc}_`,
           { parse_mode: 'Markdown' }
         );
         return;
       } catch (payErr) {
         if (payErr instanceof LnAddressPayoutError) {
-          // Fall through to BOLT11 fallback.
           console.warn('[release] LN Address payout failed, falling back to BOLT11:', payErr.message);
         } else {
           throw payErr;
@@ -566,12 +510,11 @@ bot.action(/^release:(.+)$/, async (ctx) => {
       }
     }
 
-    // Fallback: request a BOLT11 invoice from the seller.
     setState(sellerTelegramId, 'AWAITING_BOLT11', { escrowId, amountSats: escrow.amount_sats });
     await bot.telegram.sendMessage(
       sellerTelegramId,
       `💸 *Payout Ready!*\n\n` +
-      `${escrow.amount_sats.toLocaleString()} sats are waiting for you.\n\n` +
+      `${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()}) are waiting for you.\n\n` +
       `⚠️ Your Lightning Address payout failed. Please send a BOLT11 invoice for *${escrow.amount_sats.toLocaleString()} sats* to receive your funds.\n\n` +
       `_(Generate one in your wallet app and paste it here.)_`,
       { parse_mode: 'Markdown' }
@@ -602,10 +545,7 @@ bot.action(/^dispute:(.+)$/, async (ctx) => {
       return ctx.answerCbQuery('Dispute can only be opened on a funded escrow.', { show_alert: true });
     }
 
-    // Atomic transition to DISPUTED.
     await transitionEscrowState(escrowId, 'FUNDED', 'DISPUTED');
-
-    // Increment disputed_trades for both parties.
     await incrementDisputedTrades(String(escrow.creator_id));
     if (escrow.invitee_id) {
       await incrementDisputedTrades(String(escrow.invitee_id));
@@ -616,7 +556,6 @@ bot.action(/^dispute:(.+)$/, async (ctx) => {
       { parse_mode: 'Markdown' }
     );
 
-    // Build and send the admin dossier.
     await sendDisputeDossier(escrow, ctx.from);
 
   } catch (err) {
@@ -628,23 +567,21 @@ bot.action(/^dispute:(.+)$/, async (ctx) => {
   }
 });
 
-/**
- * Send an "Escrow Dossier" to the admin Telegram user with inline action buttons.
- *
- * @param {object} escrow    - Full escrow row with joined user data.
- * @param {object} initiator - ctx.from of the user who triggered the dispute.
- */
 async function sendDisputeDossier(escrow, initiator) {
-  const creatorHandle  = escrow.creator?.username  ? `@${escrow.creator.username}`  : escrow.creator_id;
-  const inviteeHandle  = escrow.invitee?.username  ? `@${escrow.invitee.username}`  : (escrow.invitee_id ?? 'N/A');
-  const initiatorHandle = initiator.username ? `@${initiator.username}` : `User ${initiator.id}`;
+  const creatorHandle  = escapeMd(escrow.creator?.username  ? `@${escrow.creator.username}`  : escrow.creator_id);
+  const inviteeHandle  = escapeMd(escrow.invitee?.username  ? `@${escrow.invitee.username}`  : (escrow.invitee_id ?? 'N/A'));
+  const initiatorHandle = escapeMd(initiator.username ? `@${initiator.username}` : `User ${initiator.id}`);
+
+  const safeDesc = escapeMd(escrow.trade_description);
+  const amountKes = await satsToKes(escrow.amount_sats);
+  const feeKes = await satsToKes(escrow.platform_fee_sats);
 
   const dossier =
     `🚨 *DISPUTE DOSSIER* 🚨\n\n` +
     `*Escrow ID:* \`${escrow.escrow_id}\`\n` +
-    `*Trade:* ${escrow.trade_description}\n` +
-    `*Amount:* ${escrow.amount_sats.toLocaleString()} sats\n` +
-    `*Fee:* ${escrow.platform_fee_sats.toLocaleString()} sats\n\n` +
+    `*Trade:* ${safeDesc}\n` +
+    `*Amount:* ${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()})\n` +
+    `*Fee:* ${escrow.platform_fee_sats.toLocaleString()} sats (~KES ${feeKes.toLocaleString()})\n\n` +
     `*Creator (${escrow.creator_role}):* ${creatorHandle}\n` +
     `*Counterparty (${escrow.creator_role === 'Buyer' ? 'Seller' : 'Buyer'}):* ${inviteeHandle}\n\n` +
     `*Dispute opened by:* ${initiatorHandle}\n` +
@@ -666,9 +603,6 @@ async function sendDisputeDossier(escrow, initiator) {
 // Admin actions (DISPUTED → SETTLED / CANCELLED)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Guard: only the configured admin can use admin actions.
- */
 function isAdmin(ctx) {
   return String(ctx.from.id) === config.ADMIN_TELEGRAM_ID;
 }
@@ -682,10 +616,10 @@ bot.action(/^admin:payout:(.+)$/, async (ctx) => {
     const escrow   = await getEscrowById(escrowId);
     await transitionEscrowState(escrowId, 'DISPUTED', 'SETTLED');
 
-    const sellerTelegramId =
-      escrow.creator_role === 'Seller' ? escrow.creator_id : escrow.invitee_id;
+    const sellerTelegramId = escrow.creator_role === 'Seller' ? escrow.creator_id : escrow.invitee_id;
     const seller = await getUserByTelegramId(sellerTelegramId);
     const memo   = `Admin-resolved escrow: ${escrow.trade_description}`;
+    const amountKes = await satsToKes(escrow.amount_sats);
 
     if (seller.default_ln_address) {
       await payToLightningAddress({
@@ -701,7 +635,7 @@ bot.action(/^admin:payout:(.+)$/, async (ctx) => {
       await bot.telegram.sendMessage(
         sellerTelegramId,
         `💸 The admin has resolved the dispute in your favour!\n` +
-        `Please send a BOLT11 invoice for *${escrow.amount_sats.toLocaleString()} sats* to receive your payout.`,
+        `Please send a BOLT11 invoice for *${escrow.amount_sats.toLocaleString()} sats* (~KES ${amountKes.toLocaleString()}) to receive your payout.`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -711,9 +645,7 @@ bot.action(/^admin:payout:(.+)$/, async (ctx) => {
       parse_mode: 'Markdown',
     });
 
-    // Notify both parties.
-    const buyerTelegramId =
-      escrow.creator_role === 'Buyer' ? escrow.creator_id : escrow.invitee_id;
+    const buyerTelegramId = escrow.creator_role === 'Buyer' ? escrow.creator_id : escrow.invitee_id;
     await bot.telegram.sendMessage(buyerTelegramId,
       `⚖️ The admin has resolved the dispute. Funds have been released to the Seller.`);
     await bot.telegram.sendMessage(sellerTelegramId,
@@ -734,13 +666,12 @@ bot.action(/^admin:refund:(.+)$/, async (ctx) => {
     const escrow = await getEscrowById(escrowId);
     await transitionEscrowState(escrowId, 'DISPUTED', 'CANCELLED');
 
-    const buyerTelegramId =
-      escrow.creator_role === 'Buyer' ? escrow.creator_id : escrow.invitee_id;
+    const buyerTelegramId = escrow.creator_role === 'Buyer' ? escrow.creator_id : escrow.invitee_id;
     const buyer = await getUserByTelegramId(buyerTelegramId);
     const memo  = `Admin-ordered refund: ${escrow.trade_description}`;
 
-    // Refund total paid (amount + fee).
     const refundSats = escrow.amount_sats + escrow.platform_fee_sats;
+    const refundKes = await satsToKes(refundSats);
 
     if (buyer.default_ln_address) {
       await payToLightningAddress({
@@ -753,7 +684,7 @@ bot.action(/^admin:refund:(.+)$/, async (ctx) => {
       await bot.telegram.sendMessage(
         buyerTelegramId,
         `↩️ The admin has ordered a refund in your favour!\n` +
-        `Please send a BOLT11 invoice for *${refundSats.toLocaleString()} sats*.`,
+        `Please send a BOLT11 invoice for *${refundSats.toLocaleString()} sats* (~KES ${refundKes.toLocaleString()}).`,
         { parse_mode: 'Markdown' }
       );
     }
@@ -762,8 +693,7 @@ bot.action(/^admin:refund:(.+)$/, async (ctx) => {
       parse_mode: 'Markdown',
     });
 
-    const sellerTelegramId =
-      escrow.creator_role === 'Seller' ? escrow.creator_id : escrow.invitee_id;
+    const sellerTelegramId = escrow.creator_role === 'Seller' ? escrow.creator_id : escrow.invitee_id;
     await bot.telegram.sendMessage(buyerTelegramId,
       `⚖️ The admin has resolved the dispute in your favour. A refund is on its way.`);
     if (sellerTelegramId) {
@@ -778,22 +708,19 @@ bot.action(/^admin:refund:(.+)$/, async (ctx) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Text message handler — drives multi-step conversation flows
+// Text message handler
 // ─────────────────────────────────────────────────────────────────────────────
 
 bot.on('text', async (ctx) => {
   const state = getState(ctx.from.id);
   const text  = ctx.message.text.trim();
 
-  // Ignore commands here (they're handled by their own .command() handlers).
   if (text.startsWith('/')) return;
 
   if (!state) {
-    // No active conversation — show the menu.
     return sendMainMenu(ctx);
   }
 
-  // ── AWAITING_LN_ADDRESS ───────────────────────────────────────────────────
   if (state.step === 'AWAITING_LN_ADDRESS') {
     if (!text.includes('@') || text.includes(' ')) {
       return ctx.reply('❌ Invalid format. Please send a Lightning Address like `alice@blink.sv`', {
@@ -811,28 +738,44 @@ bot.on('text', async (ctx) => {
     }
   }
 
-  // ── ESCROW_AWAITING_AMOUNT ────────────────────────────────────────────────
   if (state.step === 'ESCROW_AWAITING_AMOUNT') {
-    const amount = parseInt(text, 10);
-    if (isNaN(amount) || amount < 1000) {
-      return ctx.reply('❌ Please enter a valid amount (minimum 1,000 sats).');
+    const kesValue = parseInt(text.replace(/[^0-9]/g, ''), 10);
+
+    if (isNaN(kesValue) || kesValue <= 0) {
+      return ctx.reply('❌ Please enter a valid KES amount (e.g. `5000`).');
     }
-    const fee = calculatePlatformFee(amount);
-    setState(ctx.from.id, 'ESCROW_AWAITING_DESCRIPTION', {
-      amountSats:      amount,
-      platformFeeSats: fee,
-    });
-    await ctx.reply(
-      `💰 Amount: *${amount.toLocaleString()} sats*\n` +
-      `🏦 Platform fee: *${fee.toLocaleString()} sats* (${config.PLATFORM_FEE_PERCENTAGE * 100}% min ${config.PLATFORM_FEE_MIN_SATS})\n` +
-      `💳 Total buyer pays: *${(amount + fee).toLocaleString()} sats*\n\n` +
-      `Now, please describe the trade (e.g. "1 month VPN subscription"):`,
-      { parse_mode: 'Markdown' }
-    );
+
+    try {
+      const amountSats = await kesToSats(kesValue);
+
+      if (isNaN(amountSats) || amountSats < 1000) {
+        return ctx.reply('❌ Amount too low. The minimum escrow size is roughly KES 100 (1,000 sats).');
+      }
+
+      const feeSats = calculatePlatformFee(amountSats);
+      const feeKes = await satsToKes(feeSats);
+      
+      setState(ctx.from.id, 'ESCROW_AWAITING_DESCRIPTION', {
+        amountSats:      amountSats,
+        platformFeeSats: feeSats,
+      });
+
+      const totalKes = kesValue + feeKes;
+
+      await ctx.reply(
+        `💰 Amount: *KES ${kesValue.toLocaleString()}* (~${amountSats.toLocaleString()} sats)\n` +
+        `🏦 Platform fee: *KES ${feeKes.toLocaleString()}* (~${feeSats.toLocaleString()} sats)\n` +
+        `💳 Total buyer pays: *KES ${totalKes.toLocaleString()}* (~${(amountSats + feeSats).toLocaleString()} sats)\n\n` +
+        `Now, please describe the trade (e.g. "1 month VPN subscription"):`,
+        { parse_mode: 'Markdown' }
+      );
+    } catch (err) {
+      console.error('[kes conversion]', err);
+      return ctx.reply('❌ Failed to fetch current exchange rate. Please try again.');
+    }
     return;
   }
 
-  // ── ESCROW_AWAITING_DESCRIPTION ───────────────────────────────────────────
   if (state.step === 'ESCROW_AWAITING_DESCRIPTION') {
     if (text.length < 5 || text.length > 200) {
       return ctx.reply('❌ Description must be between 5 and 200 characters.');
@@ -850,17 +793,18 @@ bot.on('text', async (ctx) => {
 
       clearState(ctx.from.id);
 
-      // Build the deep-link invite URL.
       const botUsername = ctx.botInfo?.username ?? 'this_bot';
       const inviteLink  = `https://t.me/${botUsername}?start=${DEEP_LINK_PREFIX}${escrow.escrow_id}`;
+      const safeDesc = escapeMd(escrow.trade_description);
+      const amountKes = await satsToKes(escrow.amount_sats);
 
       await ctx.reply(
         `✅ *Escrow Created!*\n\n` +
         `*ID:* \`${escrow.escrow_id.slice(0, 8)}…\`\n` +
         `*Role:* ${escrow.creator_role}\n` +
-        `*Amount:* ${escrow.amount_sats.toLocaleString()} sats\n` +
-        `*Trade:* ${escrow.trade_description}\n\n` +
-        `📤 *Share this link with your counterparty:*\n${inviteLink}`,
+        `*Amount:* ${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()})\n` +
+        `*Trade:* ${safeDesc}\n\n` +
+        `📤 *Share this link with your counterparty:*\n${escapeMd(inviteLink)}`,
         { parse_mode: 'Markdown', disable_web_page_preview: true }
       );
     } catch (err) {
@@ -871,9 +815,7 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // ── AWAITING_BOLT11 (fallback payout) ────────────────────────────────────
   if (state.step === 'AWAITING_BOLT11') {
-    // Very basic BOLT11 sanity check (starts with lnbc or lntb, no spaces).
     if (!text.toLowerCase().startsWith('ln') || text.includes(' ')) {
       return ctx.reply('❌ That doesn\'t look like a valid BOLT11 invoice. Please try again.');
     }
@@ -886,7 +828,8 @@ bot.on('text', async (ctx) => {
         memo:           `Escrow payout: ${escrowId}`,
       });
       clearState(ctx.from.id);
-      await ctx.reply(`✅ *Payment sent!* ${amountSats.toLocaleString()} sats are on their way.`, {
+      const amountKes = await satsToKes(amountSats);
+      await ctx.reply(`✅ *Payment sent!* ${amountSats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()}) are on their way.`, {
         parse_mode: 'Markdown',
       });
     } catch (err) {
@@ -898,7 +841,6 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // ── Default fallback ──────────────────────────────────────────────────────
   clearState(ctx.from.id);
   return sendMainMenu(ctx);
 });
@@ -918,32 +860,15 @@ bot.catch((err, ctx) => {
 
 const app = express();
 
-// Parse raw bodies BEFORE Telegraf middleware so the secret-token check works.
-// Telegraf's `webhookCallback` reads the raw body internally.
 app.use(express.json());
 
-/**
- * Health check endpoint — used by Railway's health-check probe.
- * Returns 200 as long as the process is alive.
- */
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-/**
- * Telegram webhook endpoint.
- *
- * Security model:
- *   Telegraf validates the `X-Telegram-Bot-Api-Secret-Token` header against
- *   `config.TELEGRAM_WEBHOOK_SECRET` before passing the update to any handler.
- *   Any request with a missing or wrong token is rejected with 403.
- */
-app.use(
-  WEBHOOK_PATH,
-  bot.webhookCallback(WEBHOOK_PATH, {
-    secretToken: config.TELEGRAM_WEBHOOK_SECRET,
-  })
-);
+app.use(bot.webhookCallback(WEBHOOK_PATH, {
+  secretToken: config.TELEGRAM_WEBHOOK_SECRET,
+}));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Startup sequence
@@ -951,9 +876,6 @@ app.use(
 
 async function main() {
   console.log('[startup] Validating environment…');
-  // config/env.js already validated all vars at require-time; reaching here
-  // means they're all present.
-
   console.log('[startup] Warming Blink wallet cache…');
   await initBlink();
 
@@ -961,15 +883,10 @@ async function main() {
   const webhookUrl = `${config.WEBHOOK_DOMAIN}${WEBHOOK_PATH}`;
   await bot.telegram.setWebhook(webhookUrl, {
     secret_token: config.TELEGRAM_WEBHOOK_SECRET,
-    // Only receive these update types to reduce noise.
     allowed_updates: ['message', 'callback_query'],
-    // Drop updates older than 60 seconds (e.g. accumulated during downtime).
     drop_pending_updates: true,
   });
   console.log(`[startup] Webhook registered: ${webhookUrl}`);
-
-  const webhookInfo = await bot.telegram.getWebhookInfo();
-  console.log('[startup] Webhook info:', JSON.stringify(webhookInfo, null, 2));
 
   app.listen(config.PORT, () => {
     console.log(`[startup] Express server listening on port ${config.PORT}`);
