@@ -274,7 +274,7 @@ async function payToLightningAddress({ lnAddress, amountSats, memo }) {
         walletId,
         lnAddress,
         amount: amountSats,
-        memo: memo.slice(0, 100),
+        // MEMO HAS BEEN STRICTLY REMOVED FROM THIS OBJECT
       },
     });
   } catch (err) {
@@ -297,12 +297,9 @@ async function payToLightningAddress({ lnAddress, amountSats, memo }) {
     transactionId: result.transaction?.id ?? 'unknown',
   };
 }
-
-async function payBolt11Invoice({ paymentRequest, memo }) {
+ async function payBolt11Invoice({ paymentRequest, memo }) {
   const walletId = await getBtcWalletId();
 
-  // We changed the input type to LnInvoicePaymentInput 
-  // and removed the memo from the variables to satisfy the Blink schema.
   const data = await blinkRequest(`
     mutation LnInvoicePaymentSend($input: LnInvoicePaymentInput!) {
       lnInvoicePaymentSend(input: $input) {

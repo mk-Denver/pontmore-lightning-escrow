@@ -1,31 +1,21 @@
 /**
  * services/supabase.js
  *
- * Supabase client initialisation plus all database access functions used by
- * the bot.  Nothing outside this file should import the raw `supabase` client
- * — all DB work goes through the typed helpers below.
+ * Supabase client + all DB access helpers.
  *
- * KEY DESIGN DECISIONS
- * ─────────────────────
- * 1. ATOMIC STATE TRANSITIONS
- *    Every state change uses a Postgres RPC function (`transition_escrow_state`)
- *    that runs an `UPDATE … WHERE state = expected_state RETURNING *` inside a
- *    single statement.  Because Postgres executes this atomically, two
- *    concurrent requests can never both "win" the same transition — only the
- *    first UPDATE will match the row; the second will see 0 rows returned and
- *    we throw a `StateConflictError`.
+ * CHANGE LOG (v2)
+ * ───────────────
+ * - Added `payout_successful` boolean column support (default false in DB).
+ * - Added `setPayoutSuccessful(escrowId)` — called after a confirmed payout.
+ * - Added `getSettledUnpaidEscrows()` — used by the startup recovery routine.
+ * - `PENDING_FUNDING → PENDING_FUNDING` self-transition re-added to
+ *   VALID_TRANSITIONS to allow blink_payment_hash to be stamped atomically.
  *
- *    The SQL for the RPC is provided in a comment block below so you can paste
- *    it into the Supabase SQL editor once and never touch it again.
- *
- * 2. SERVICE ROLE KEY
- *    We use the service-role key (bypasses RLS) because the bot is the sole
- *    trusted actor.  Never expose this key to the frontend.
- *
- * 3. ERROR TYPES
- *    `StateConflictError`  — thrown when a concurrent request already moved
- *                            the escrow out of the expected state.
- *    `NotFoundError`       — thrown when a lookup returns no row.
+ * REQUIRED SCHEMA MIGRATION (run once in Supabase SQL editor)
+ * ────────────────────────────────────────────────────────────
+ *   ALTER TABLE escrows
+ *     ADD COLUMN IF NOT EXISTS payout_successful BOOLEAN NOT NULL DEFAULT false,
+ *     ADD COLUMN IF NOT EXISTS updated_at        TIMESTAMPTZ DEFAULT NOW();
  */
 
 'use strict';
@@ -34,29 +24,27 @@ const { createClient } = require('@supabase/supabase-js');
 const { config } = require('../config/env');
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Supabase client (singleton)
+// Client (singleton)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const supabase = createClient(
   config.SUPABASE_PROJECT_URL,
   config.SUPABASE_SERVICE_ROLE_KEY,
   {
-    auth: {
-      // The service-role key doesn't need session management.
-      persistSession: false,
-      autoRefreshToken: false,
-    },
+    auth: { persistSession: false, autoRefreshToken: false },
   }
 );
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SQL you must run ONCE in the Supabase SQL editor
+// SQL: paste into Supabase SQL editor — run ONCE
 // ─────────────────────────────────────────────────────────────────────────────
 /*
-  -- Atomic escrow state transition function.
-  -- Only updates the row when the current state matches `p_expected_state`.
-  -- Returns the updated row or NULL if the state didn't match (race condition).
+  -- 1. Schema migration
+  ALTER TABLE escrows
+    ADD COLUMN IF NOT EXISTS payout_successful BOOLEAN NOT NULL DEFAULT false,
+    ADD COLUMN IF NOT EXISTS updated_at        TIMESTAMPTZ DEFAULT NOW();
 
+  -- 2. Atomic state-transition RPC
   CREATE OR REPLACE FUNCTION transition_escrow_state(
     p_escrow_id      UUID,
     p_expected_state TEXT,
@@ -65,15 +53,15 @@ const supabase = createClient(
   )
   RETURNS SETOF escrows
   LANGUAGE plpgsql
-  SECURITY DEFINER          -- runs as the function owner, not the caller
+  SECURITY DEFINER
   AS $$
   BEGIN
     RETURN QUERY
     UPDATE escrows
     SET
-      state                = p_new_state,
-      blink_payment_hash   = COALESCE((p_extra->>'blink_payment_hash'), blink_payment_hash),
-      updated_at           = NOW()
+      state              = p_new_state,
+      blink_payment_hash = COALESCE((p_extra->>'blink_payment_hash'), blink_payment_hash),
+      updated_at         = NOW()
     WHERE
       escrow_id = p_escrow_id
       AND state = p_expected_state
@@ -81,8 +69,25 @@ const supabase = createClient(
   END;
   $$;
 
-  -- Make sure your escrows table also has an `updated_at` column:
-  -- ALTER TABLE escrows ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+  -- 3. Atomic counter increment (whitelisted columns only)
+  CREATE OR REPLACE FUNCTION increment_user_counter(
+    p_telegram_id TEXT,
+    p_column      TEXT
+  )
+  RETURNS VOID
+  LANGUAGE plpgsql
+  SECURITY DEFINER
+  AS $$
+  BEGIN
+    IF p_column NOT IN ('completed_trades', 'disputed_trades') THEN
+      RAISE EXCEPTION 'Invalid column name: %', p_column;
+    END IF;
+    EXECUTE format(
+      'UPDATE users SET %I = %I + 1 WHERE telegram_id = $1',
+      p_column, p_column
+    ) USING p_telegram_id;
+  END;
+  $$;
 */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -110,15 +115,13 @@ class NotFoundError extends Error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Valid state machine transitions (for documentation / assertion use)
+// Valid state machine transitions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * All legal (fromState → toState) transitions.
- * The bot code must only call transitionEscrowState() with these pairs.
- */
 const VALID_TRANSITIONS = Object.freeze({
   CREATED:         ['PENDING_FUNDING', 'CANCELLED'],
+  // PENDING_FUNDING → PENDING_FUNDING is a valid "self-transition" used
+  // exclusively to stamp the blink_payment_hash after invoice creation.
   PENDING_FUNDING: ['PENDING_FUNDING', 'FUNDED', 'CANCELLED'],
   FUNDED:          ['SETTLED', 'DISPUTED', 'CANCELLED'],
   DISPUTED:        ['SETTLED', 'CANCELLED'],
@@ -131,27 +134,15 @@ const VALID_TRANSITIONS = Object.freeze({
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Upsert a user record.  Called on every /start to keep username fresh.
- *
- * @param {string} telegramId   - Telegram numeric user ID (stored as string).
- * @param {string} username     - Telegram @username (may be undefined).
- * @returns {Promise<object>}   - The upserted user row.
+ * Upsert a user — called on every interaction to keep username fresh.
+ * Does NOT overwrite completed_trades or disputed_trades.
  */
 async function upsertUser(telegramId, username) {
   const { data, error } = await supabase
     .from('users')
     .upsert(
-      {
-        telegram_id: String(telegramId),
-        username: username ?? null,
-        // completed_trades and disputed_trades have DB defaults (0).
-        // created_at has a DB default (NOW()).
-      },
-      {
-        onConflict: 'telegram_id',
-        // Only refresh username on conflict — don't clobber trade counters.
-        ignoreDuplicates: false,
-      }
+      { telegram_id: String(telegramId), username: username ?? null },
+      { onConflict: 'telegram_id', ignoreDuplicates: false }
     )
     .select()
     .single();
@@ -161,10 +152,7 @@ async function upsertUser(telegramId, username) {
 }
 
 /**
- * Fetch a single user by Telegram ID.
- *
- * @param {string} telegramId
- * @returns {Promise<object>}
+ * Fetch a user by Telegram ID.
  * @throws {NotFoundError}
  */
 async function getUserByTelegramId(telegramId) {
@@ -179,13 +167,7 @@ async function getUserByTelegramId(telegramId) {
   return data;
 }
 
-/**
- * Save (or update) a user's default Lightning Address.
- *
- * @param {string} telegramId
- * @param {string} lnAddress  - e.g. alice@blink.sv
- * @returns {Promise<object>}
- */
+/** Save or update a user's default Lightning Address. */
 async function setDefaultLnAddress(telegramId, lnAddress) {
   const { data, error } = await supabase
     .from('users')
@@ -203,16 +185,8 @@ async function setDefaultLnAddress(telegramId, lnAddress) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Create a new escrow record in state 'CREATED'.
- *
- * @param {{
- *   creatorId:        string,
- *   creatorRole:      'Buyer' | 'Seller',
- *   amountSats:       number,
- *   platformFeeSats:  number,
- *   tradeDescription: string,
- * }} params
- * @returns {Promise<object>} - The newly created escrow row (includes escrow_id UUID).
+ * Create a new escrow in state 'CREATED'.
+ * `payout_successful` defaults to false at the DB level.
  */
 async function createEscrow({
   creatorId,
@@ -224,15 +198,12 @@ async function createEscrow({
   const { data, error } = await supabase
     .from('escrows')
     .insert({
-      // escrow_id is a UUID generated by Postgres (gen_random_uuid() default).
       creator_id:        String(creatorId),
       creator_role:      creatorRole,
       amount_sats:       amountSats,
       platform_fee_sats: platformFeeSats,
       trade_description: tradeDescription,
       state:             'CREATED',
-      // invitee_id and blink_payment_hash are NULL until the counterparty joins
-      // and the invoice is generated.
     })
     .select()
     .single();
@@ -242,10 +213,7 @@ async function createEscrow({
 }
 
 /**
- * Fetch a single escrow by its UUID primary key.
- *
- * @param {string} escrowId - UUID
- * @returns {Promise<object>}
+ * Fetch an escrow by UUID, with joined user rows for creator and invitee.
  * @throws {NotFoundError}
  */
 async function getEscrowById(escrowId) {
@@ -261,25 +229,15 @@ async function getEscrowById(escrowId) {
 }
 
 /**
- * Set the invitee once the counterparty accepts the invite link.
- * Only valid when escrow is in state 'CREATED'.
- *
- * @param {string} escrowId
- * @param {string} inviteeTelegramId
- * @returns {Promise<object>} - Updated escrow row.
+ * Claim the invitee slot.  Validates CREATED state, no existing invitee,
+ * and prevents self-invite — all before the UPDATE so the failure is
+ * informative rather than a silent constraint violation.
  */
 async function setEscrowInvitee(escrowId, inviteeTelegramId) {
-  // First confirm the escrow is still CREATED (not already claimed / cancelled).
   const escrow = await getEscrowById(escrowId);
-  if (escrow.state !== 'CREATED') {
-    throw new StateConflictError(escrowId, 'CREATED');
-  }
-  if (escrow.invitee_id) {
-    throw new Error(`[supabase] Escrow ${escrowId} already has an invitee.`);
-  }
-  if (escrow.creator_id === String(inviteeTelegramId)) {
-    throw new Error('[supabase] Creator cannot be their own counterparty.');
-  }
+  if (escrow.state !== 'CREATED')              throw new StateConflictError(escrowId, 'CREATED');
+  if (escrow.invitee_id)                        throw new Error(`[supabase] Escrow ${escrowId} already has an invitee.`);
+  if (escrow.creator_id === String(inviteeTelegramId)) throw new Error('[supabase] Creator cannot be their own counterparty.');
 
   const { data, error } = await supabase
     .from('escrows')
@@ -293,30 +251,21 @@ async function setEscrowInvitee(escrowId, inviteeTelegramId) {
 }
 
 /**
- * ATOMIC state transition via the Postgres RPC function.
+ * ATOMIC state transition via the `transition_escrow_state` Postgres RPC.
  *
- * This is the ONLY function that may change escrow.state.  It calls the
- * `transition_escrow_state` RPC which does an atomic
- * `UPDATE … WHERE state = p_expected_state RETURNING *`.
+ * The RPC runs UPDATE … WHERE state = p_expected_state RETURNING *.
+ * An empty result means a race condition won — we throw StateConflictError.
  *
- * If the row is not in expectedState (race condition), the RPC returns 0 rows
- * and we throw StateConflictError to the caller.
- *
- * @param {string}  escrowId        - UUID of the escrow to update.
- * @param {string}  expectedState   - The state the escrow MUST be in right now.
- * @param {string}  newState        - The state to transition to.
- * @param {object}  [extra={}]      - Optional extra fields to update simultaneously
- *                                    (e.g. { blink_payment_hash: '...' }).
- * @returns {Promise<object>}       - The updated escrow row.
- * @throws {StateConflictError}     - If the escrow was not in expectedState.
+ * @param {string} escrowId
+ * @param {string} expectedState - Escrow MUST be in this state right now.
+ * @param {string} newState      - Target state.
+ * @param {object} [extra={}]    - Optional extra fields (e.g. { blink_payment_hash }).
+ * @throws {StateConflictError}
  */
 async function transitionEscrowState(escrowId, expectedState, newState, extra = {}) {
-  // Guard: developer-time assertion so we catch invalid transitions in testing.
   const allowed = VALID_TRANSITIONS[expectedState] ?? [];
   if (!allowed.includes(newState)) {
-    throw new Error(
-      `[supabase] Invalid state transition: ${expectedState} → ${newState}`
-    );
+    throw new Error(`[supabase] Invalid state transition: ${expectedState} → ${newState}`);
   }
 
   const { data, error } = await supabase.rpc('transition_escrow_state', {
@@ -327,39 +276,71 @@ async function transitionEscrowState(escrowId, expectedState, newState, extra = 
   });
 
   if (error) throw new Error(`[supabase] transitionEscrowState RPC failed: ${error.message}`);
-
-  // The RPC returns an array via SETOF.  Empty array = state didn't match.
-  if (!data || data.length === 0) {
-    throw new StateConflictError(escrowId, expectedState);
-  }
+  if (!data || data.length === 0) throw new StateConflictError(escrowId, expectedState);
 
   return data[0];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Payout tracking (v2)
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Increment the completed_trades counter for a user atomically.
- * Called after a successful SETTLED transition.
+ * Mark an escrow's payout as successful.
+ * Called immediately after a confirmed Lightning payment to the seller.
+ * This is a simple UPDATE — no state machine involved — so it is safe to call
+ * multiple times (idempotent by nature of setting a boolean to true).
  *
- * @param {string} telegramId
+ * @param {string} escrowId
  */
+async function setPayoutSuccessful(escrowId) {
+  const { error } = await supabase
+    .from('escrows')
+    .update({ payout_successful: true, updated_at: new Date().toISOString() })
+    .eq('escrow_id', escrowId);
+
+  if (error) {
+    // Non-fatal log — the payment already happened; we must not throw here
+    // in case the caller is mid-notification sequence.
+    console.error(`[supabase] setPayoutSuccessful failed for ${escrowId}: ${error.message}`);
+  }
+}
+
+/**
+ * Fetch all escrows that are SETTLED but whose payout has not been confirmed.
+ *
+ * These rows indicate the bot crashed (or Blink timed out) after the state
+ * transition but before the payment was confirmed.  The startup recovery
+ * routine will iterate over them and re-attempt payouts.
+ *
+ * Includes joined creator/invitee user rows so the recovery routine has
+ * access to saved Lightning Addresses without extra queries.
+ *
+ * @returns {Promise<object[]>}
+ */
+async function getSettledUnpaidEscrows() {
+  const { data, error } = await supabase
+    .from('escrows')
+    .select('*, creator:users!creator_id(*), invitee:users!invitee_id(*)')
+    .eq('state', 'SETTLED')
+    .eq('payout_successful', false);
+
+  if (error) throw new Error(`[supabase] getSettledUnpaidEscrows failed: ${error.message}`);
+  return data ?? [];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trade counter helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function incrementCompletedTrades(telegramId) {
-  // Supabase doesn't expose `col + 1` directly in JS, so we use rpc or raw SQL.
-  // Here we use a simple approach: fetch then update (acceptable since this is
-  // a post-settlement non-critical stat update).
   const { error } = await supabase.rpc('increment_user_counter', {
     p_telegram_id: String(telegramId),
     p_column:      'completed_trades',
   });
-  // Non-fatal: log but don't throw — the settlement already succeeded.
   if (error) console.error('[supabase] incrementCompletedTrades failed:', error.message);
 }
 
-/**
- * Increment the disputed_trades counter for a user atomically.
- * Called when an escrow enters DISPUTED state.
- *
- * @param {string} telegramId
- */
 async function incrementDisputedTrades(telegramId) {
   const { error } = await supabase.rpc('increment_user_counter', {
     p_telegram_id: String(telegramId),
@@ -368,38 +349,12 @@ async function incrementDisputedTrades(telegramId) {
   if (error) console.error('[supabase] incrementDisputedTrades failed:', error.message);
 }
 
-/*
-  ── SQL for increment_user_counter RPC ──────────────────────────────────────
-  Paste into the Supabase SQL editor:
-
-  CREATE OR REPLACE FUNCTION increment_user_counter(
-    p_telegram_id TEXT,
-    p_column      TEXT
-  )
-  RETURNS VOID
-  LANGUAGE plpgsql
-  SECURITY DEFINER
-  AS $$
-  BEGIN
-    -- Whitelist allowed column names to prevent SQL injection.
-    IF p_column NOT IN ('completed_trades', 'disputed_trades') THEN
-      RAISE EXCEPTION 'Invalid column name: %', p_column;
-    END IF;
-
-    EXECUTE format(
-      'UPDATE users SET %I = %I + 1 WHERE telegram_id = $1',
-      p_column, p_column
-    ) USING p_telegram_id;
-  END;
-  $$;
-*/
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Exports
 // ─────────────────────────────────────────────────────────────────────────────
 
 module.exports = {
-  supabase,              // raw client, available for one-off queries in handlers
+  supabase,
   StateConflictError,
   NotFoundError,
   VALID_TRANSITIONS,
@@ -412,6 +367,10 @@ module.exports = {
   getEscrowById,
   setEscrowInvitee,
   transitionEscrowState,
+  // Payout tracking
+  setPayoutSuccessful,
+  getSettledUnpaidEscrows,
+  // Counters
   incrementCompletedTrades,
   incrementDisputedTrades,
 };
