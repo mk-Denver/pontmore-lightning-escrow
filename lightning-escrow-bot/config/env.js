@@ -113,10 +113,15 @@ function calculatePlatformFee(amountSats) {
  * @param {number} totalFeeSats - Output of calculatePlatformFee().
  * @returns {{ buyerFeeSats: number, sellerFeeSats: number }}
  */
+/**
+ * Allocate 100% of the platform fee to the Buyer.
+ * Seller pays nothing (0 sats).
+ *
+ * Buyer pays:    amountSats + buyerFeeSats   (invoice amount)
+ * Seller gets:   amountSats                  (payout amount)
+ */
 function splitPlatformFee(totalFeeSats) {
-  const sellerFeeSats = Math.floor(totalFeeSats / 2);
-  const buyerFeeSats  = totalFeeSats - sellerFeeSats; // picks up odd sat
-  return { buyerFeeSats, sellerFeeSats };
+  return { buyerFeeSats: totalFeeSats, sellerFeeSats: 0 };
 }
 
 module.exports = { config, calculatePlatformFee, splitPlatformFee };
