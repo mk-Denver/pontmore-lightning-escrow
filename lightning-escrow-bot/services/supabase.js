@@ -348,7 +348,33 @@ async function incrementDisputedTrades(telegramId) {
   });
   if (error) console.error('[supabase] incrementDisputedTrades failed:', error.message);
 }
+/**
+ * Fetch all escrows in FUNDED state that are older than X days.
+ */
+async function getExpiredFundedEscrows(days = 3) {
+  const thresholdDate = new Date(Date.now() - (days * 24 * 60 * 60 * 1000)).toISOString();
+  const { data, error } = await supabase
+    .from('escrows')
+    .select('*, creator:users!creator_id(*), invitee:users!invitee_id(*)')
+    .eq('state', 'FUNDED')
+    .lt('updated_at', thresholdDate);
+  if (error) throw new Error(`[supabase] getExpiredFundedEscrows failed: ${error.message}`);
+  return data ?? [];
+}
 
+/**
+ * Fetch all unpaid escrows (PENDING_FUNDING) older than X hours.
+ */
+async function getExpiredPendingEscrows(hours = 24) {
+  const thresholdDate = new Date(Date.now() - (hours * 60 * 60 * 1000)).toISOString();
+  const { data, error } = await supabase
+    .from('escrows')
+    .select('*')
+    .eq('state', 'PENDING_FUNDING')
+    .lt('updated_at', thresholdDate);
+  if (error) throw new Error(`[supabase] getExpiredPendingEscrows failed: ${error.message}`);
+  return data ?? [];
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Exports
 // ─────────────────────────────────────────────────────────────────────────────

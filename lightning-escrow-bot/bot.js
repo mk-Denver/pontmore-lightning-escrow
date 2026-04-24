@@ -1,12 +1,14 @@
 /**
- * bot.js — THE ULTIMATE MASTER V4
+ * bot.js — THE ULTIMATE MASTER V5 (Fort Knox Edition)
  *
- * CHANGE LOG (v4)
+ * CHANGE LOG (v5)
  * ───────────────
- * 8. BUYER PAYS 100% FEE — Seller receives exact trade amount. All UI 
- * text updated to remove "split 50/50". 
- * 9. REFUND MATH UPDATED — Buyer is refunded their base trade amount; 
- * the platform retains the 100% fee the buyer paid upfront.
+ * 10. RE-ENTRANCY GUARDS — BOLT11 text handlers now instantly clear state and 
+ * perform strict DB double-checks to prevent malicious double-paste payouts.
+ * 11. CRON JOB MUTEX LOCKS — Prevents overlapping background tasks.
+ * 12. ZOMBIE CLEANUP — Added daily cron to wipe unpaid 24h+ escrows.
+ * 13. MAX AMOUNT LIMIT — Hard cap of KES 500,000 to prevent API integer overflows.
+ * 14. MARKDOWN FIX — Removed double-asterisks on receipt variables to fix TG 400 errors.
  */
 
 'use strict';
@@ -18,6 +20,7 @@ const { config, calculatePlatformFee, splitPlatformFee } = require('./config/env
 const express              = require('express');
 const { Telegraf, Markup } = require('telegraf');
 const QRCode               = require('qrcode');
+const cron                 = require('node-cron');
 
 // ─── Services ────────────────────────────────────────────────────────────────
 const {
@@ -30,6 +33,8 @@ const {
   transitionEscrowState,
   setPayoutSuccessful,
   getSettledUnpaidEscrows,
+  getExpiredFundedEscrows,
+  getExpiredPendingEscrows,
   incrementCompletedTrades,
   incrementDisputedTrades,
   updateEscrowAmount,
@@ -54,6 +59,7 @@ const {
 
 const WEBHOOK_PATH     = `/telegram/${config.TELEGRAM_BOT_TOKEN.replace(':', '_')}`;
 const DEEP_LINK_PREFIX = 'escrow_';
+const MAX_TRADE_KES    = 500000; // Hard cap for safety
 const conversationState = new Map();
 
 function escapeMd(text) {
@@ -207,7 +213,7 @@ bot.action('menu:help', async (ctx) => {
     '4️⃣ *Delivery:* The Seller delivers the goods or services as promised.\n' +
     '5️⃣ *Get Paid:* The Buyer confirms receipt, and funds are instantly released to the Seller!\n' +
     '6️⃣ *Support:* If anything goes wrong, open a dispute and our admin team will step in.\n\n' +
-    `*💸 Platform Fee:* Just *${config.PLATFORM_FEE_PERCENTAGE * 100}%* of the trade amount.\n\n` +
+    `*💸 Platform Fee:* Just *${config.PLATFORM_FEE_PERCENTAGE * 100}%* of the trade amount, paid entirely by the Buyer.\n\n` +
     '---\n' +
     '⚡️ *New to Bitcoin Lightning? Your Starter Pack:*\n\n' +
     '• *Get a Wallet:* Download [Blink](https://www.blink.sv/) or [Wallet of Satoshi](https://www.walletofsatoshi.com/) to get a free Lightning Address.\n' +
@@ -216,10 +222,7 @@ bot.action('menu:help', async (ctx) => {
     {
       parse_mode: 'Markdown',
       disable_web_page_preview: true,
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('🆕 Start a Trade', 'menu:new_escrow')], 
-        [Markup.button.callback('🔙 Back to Menu',  'menu:main')]
-      ]),
+      ...Markup.inlineKeyboard([[Markup.button.callback('🆕 Start a Trade', 'menu:new_escrow')], [Markup.button.callback('🔙 Back to Menu',  'menu:main')]]),
     }
   );
 });
@@ -691,7 +694,6 @@ bot.action(/^admin:refund:(.+)$/, async (ctx) => {
     const buyer            = await getUserByTelegramId(buyerTelegramId);
     const memo             = `Admin-ordered refund: ${escrow.trade_description}`;
     
-    // V4 RULE: Refund buyer the base trade amount. Platform keeps the fee.
     const refundSats       = escrow.amount_sats; 
     const refundKes        = await satsToKes(refundSats);
 
@@ -789,6 +791,8 @@ bot.on('text', async (ctx) => {
   if (state.step === 'ESCROW_AWAITING_AMOUNT') {
     const kesValue = parseInt(text.replace(/[^0-9]/g, ''), 10);
     if (isNaN(kesValue) || kesValue <= 0) return ctx.reply("Just send the number — e.g. `5000` for KES 5,000.", { parse_mode: 'Markdown' });
+    if (kesValue > MAX_TRADE_KES) return ctx.reply(`❌ Amount too high. The maximum trade size is KES ${MAX_TRADE_KES.toLocaleString()}.`);
+    
     try {
       const amountSats = await kesToSats(kesValue);
       if (isNaN(amountSats) || amountSats < 1000) return ctx.reply('That amount is too small. The minimum trade is roughly KES 100 (1,000 sats).');
@@ -820,6 +824,8 @@ bot.on('text', async (ctx) => {
   if (state.step === 'AWAITING_NEW_AMOUNT') {
     const kesValue = parseInt(text.replace(/[^0-9]/g, ''), 10);
     if (isNaN(kesValue) || kesValue <= 0) return ctx.reply('❌ Please enter a valid KES amount (e.g. `5000`).');
+    if (kesValue > MAX_TRADE_KES) return ctx.reply(`❌ Amount too high. The maximum trade size is KES ${MAX_TRADE_KES.toLocaleString()}.`);
+
     try {
       const amountSats = await kesToSats(kesValue);
       if (isNaN(amountSats) || amountSats < 1000) return ctx.reply('❌ Amount too low. The minimum escrow size is roughly KES 100 (1,000 sats).');
@@ -845,7 +851,7 @@ bot.on('text', async (ctx) => {
         `*ID:* \`${updatedEscrow.escrow_id.slice(0, 8)}…\`\n` +
         `*Your role:* ${updatedEscrow.creator_role}\n` +
         `*Trade amount:* ${updatedEscrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()})\n` +
-        `*${creatorFeeNote}*\n` +
+        `${creatorFeeNote}\n` +
         `*Trade:* ${safeDesc}\n\n` +
         `📤 *Share this link with your counterparty:*\n${safeLink}`,
         { 
@@ -888,7 +894,7 @@ bot.on('text', async (ctx) => {
         `*ID:* \`${escrow.escrow_id.slice(0, 8)}…\`\n` +
         `*Your role:* ${escrow.creator_role}\n` +
         `*Amount:* ${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()})\n` +
-        `*${creatorFeeNote}*\n` +
+        `${creatorFeeNote}\n` +
         `*Trade:* ${safeDesc}\n\n` +
         `📤 *Share this invite link with your counterparty:*\n${inviteLink}`,
         { 
@@ -916,13 +922,27 @@ bot.on('text', async (ctx) => {
     return;
   }
 
+  // ── RE-ENTRANCY GUARD ADDED HERE ──
   if (state.step === 'AWAITING_BOLT11') {
-    if (!text.toLowerCase().startsWith('ln') || text.includes(' ')) return ctx.reply("That doesn't look like a valid BOLT11 invoice. Paste the full invoice starting with `ln`.", { parse_mode: 'Markdown' });
     const { escrowId, amountSats } = state.data;
+    
+    // Clear state IMMEDIATELY to prevent malicious double-pasting
+    clearState(ctx.from.id);
+
+    if (!text.toLowerCase().startsWith('ln') || text.includes(' ')) {
+      setState(ctx.from.id, 'AWAITING_BOLT11', { escrowId, amountSats }); // Restore state
+      return ctx.reply("That doesn't look like a valid BOLT11 invoice. Paste the full invoice starting with `ln`.", { parse_mode: 'Markdown' });
+    }
+    
     try {
+      // Hard DB check to prevent double-payouts
+      const escrow = await getEscrowById(escrowId);
+      if (escrow.payout_successful) {
+        return ctx.reply('⚠️ This escrow has already been paid out.');
+      }
+
       await payBolt11Invoice({ paymentRequest: text, memo: `Escrow payout: ${escrowId}` });
       await setPayoutSuccessful(escrowId);
-      clearState(ctx.from.id);
       const amountKes = await satsToKes(amountSats);
       await ctx.reply(
         `✅ *Payment sent!*\n\n${amountSats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()}) are on their way.`,
@@ -930,6 +950,7 @@ bot.on('text', async (ctx) => {
       );
     } catch (err) {
       console.error('[bolt11 payout]', err);
+      setState(ctx.from.id, 'AWAITING_BOLT11', { escrowId, amountSats }); // Restore state
       await ctx.reply(`❌ Payment failed: ${err.message}\n\nPlease paste a fresh BOLT11 invoice.`);
     }
     return;
@@ -945,7 +966,7 @@ bot.catch((err, ctx) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Startup Recovery
+// CRON: Auto-Release, Recovery & Zombie Cleanup
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function recoverPendingPayouts() {
@@ -986,8 +1007,69 @@ async function recoverPendingPayouts() {
   }
 }
 
+let isAutoReleasing = false;
+async function processAutoReleases() {
+  if (isAutoReleasing) return console.log('[cron] Auto-release skipped: previous job still running.');
+  isAutoReleasing = true;
+
+  try {
+    let expiredEscrows;
+    try { expiredEscrows = await getExpiredFundedEscrows(3); } catch (err) { return console.error('[cron] Failed to query expired escrows:', err.message); }
+    if (expiredEscrows.length === 0) return;
+    console.log(`[cron] Found ${expiredEscrows.length} escrow(s) ready for auto-release. Executing payouts...`);
+
+    for (const escrow of expiredEscrows) {
+      const escrowId         = escrow.escrow_id;
+      const sellerTelegramId = escrow.creator_role === 'Seller' ? escrow.creator_id : escrow.invitee_id;
+      const buyerTelegramId  = escrow.creator_role === 'Buyer'  ? escrow.creator_id : escrow.invitee_id;
+
+      try { await transitionEscrowState(escrowId, 'FUNDED', 'SETTLED'); } 
+      catch (err) { console.error(`[cron] Failed to transition escrow ${escrowId}:`, err.message); continue; }
+
+      const { sellerFeeSats } = splitPlatformFee(escrow.platform_fee_sats);
+      const sellerPayoutSats  = escrow.amount_sats - sellerFeeSats;
+      const payoutKes         = await satsToKes(sellerPayoutSats).catch(() => 0);
+      const safeDesc          = escapeMd(escrow.trade_description);
+      const memo              = `Auto-release settlement: ${escrow.trade_description}`;
+
+      let sellerUser;
+      try { sellerUser = await getUserByTelegramId(sellerTelegramId); } catch (err) { continue; }
+
+      if (sellerUser.default_ln_address) {
+        try {
+          await payToLightningAddress({ lnAddress: sellerUser.default_ln_address, amountSats: sellerPayoutSats, memo });
+          await setPayoutSuccessful(escrowId);
+          await incrementCompletedTrades(String(escrow.creator_id));
+          await incrementCompletedTrades(String(escrow.invitee_id));
+
+          await bot.telegram.sendMessage(sellerTelegramId, `🎉 *Auto-Release Payment Received!*\n\nThe buyer did not release the funds within 3 days, so they have been automatically routed to you.\n\n${sellerPayoutSats.toLocaleString()} sats (~KES ${payoutKes.toLocaleString()}) have landed in your Lightning Address.\n_Trade: ${safeDesc}_`, { parse_mode: 'Markdown' }).catch(()=>{});
+          await bot.telegram.sendMessage(buyerTelegramId, `⏳ *Trade Auto-Completed*\n\nSince 3 days have passed without a dispute, the funds for trade "${safeDesc}" have been automatically released to the seller.\n\nThank you for using Lightning Escrow!`, { parse_mode: 'Markdown' }).catch(()=>{});
+          console.log(`[cron] Auto-release successful for ${escrowId}`);
+          continue;
+        } catch (payErr) { console.warn(`[cron] LN Address payout failed for ${escrowId}, falling back to BOLT11.`); }
+      }
+
+      setState(sellerTelegramId, 'AWAITING_BOLT11', { escrowId, amountSats: sellerPayoutSats });
+      await bot.telegram.sendMessage(sellerTelegramId, `💸 *Auto-Release Ready — Action Required*\n\nThe buyer did not release the funds within 3 days, so they are now yours.\n\n⚠️ Automatic payout failed. Please paste a BOLT11 invoice for *${sellerPayoutSats.toLocaleString()} sats* below to claim your funds.`, { parse_mode: 'Markdown' }).catch(()=>{});
+      await bot.telegram.sendMessage(buyerTelegramId, `⏳ *Trade Auto-Completed*\n\nFunds for trade "${safeDesc}" have been automatically released to the seller after 3 days.`, { parse_mode: 'Markdown' }).catch(()=>{});
+    }
+  } finally {
+    isAutoReleasing = false;
+  }
+}
+
+async function cleanupZombieEscrows() {
+  console.log('[cron] Running daily zombie escrow cleanup...');
+  let deadEscrows;
+  try { deadEscrows = await getExpiredPendingEscrows(24); } catch (err) { return; }
+  for (const escrow of deadEscrows) {
+    try { await transitionEscrowState(escrow.escrow_id, 'PENDING_FUNDING', 'CANCELLED'); } 
+    catch (err) { /* ignore collision */ }
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Express Server & Webhook (EXPLICIT POST FIX)
+// Express Server & Webhook
 // ─────────────────────────────────────────────────────────────────────────────
 
 const app = express();
@@ -996,16 +1078,10 @@ app.use(express.json());
 app.get('/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
 app.post(WEBHOOK_PATH, (req, res, next) => {
-  console.log('[webhook] Received update from Telegram!'); 
-  return bot.webhookCallback(WEBHOOK_PATH, {
-    secretToken: config.TELEGRAM_WEBHOOK_SECRET,
-  })(req, res, next);
+  return bot.webhookCallback(WEBHOOK_PATH, { secretToken: config.TELEGRAM_WEBHOOK_SECRET })(req, res, next);
 });
 
-app.use((req, res) => {
-  console.log(`[express] 404 Not Found on path: ${req.path}`);
-  res.status(404).send('Not Found');
-});
+app.use((req, res) => res.status(404).send('Not Found'));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Startup
@@ -1018,6 +1094,11 @@ async function main() {
   console.log('[startup] Running payout recovery routine…');
   await recoverPendingPayouts();
   
+  // Start Cron Jobs
+  cron.schedule('0 * * * *', processAutoReleases); // Runs every hour at minute 0
+  cron.schedule('0 0 * * *', cleanupZombieEscrows); // Runs every day at midnight
+  console.log('[startup] Cron jobs scheduled.');
+
   console.log('[startup] Registering Telegram webhook…');
   const webhookUrl = `${config.WEBHOOK_DOMAIN}${WEBHOOK_PATH}`;
   await bot.telegram.setWebhook(webhookUrl, {
