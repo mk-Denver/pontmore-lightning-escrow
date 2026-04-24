@@ -4,7 +4,7 @@
   "description": "Telegram-based Bitcoin Lightning Network Escrow Bot",
   "main": "bot.js",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "scripts": {
     "start": "node bot.js",
@@ -13,9 +13,10 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.43.4",
     "express": "^4.19.2",
+    "node-cron": "^4.2.1",
+    "node-fetch": "^3.3.2",
     "qrcode": "^1.5.3",
-    "telegraf": "^4.16.3",
-    "node-fetch": "^3.3.2"
+    "telegraf": "^4.16.3"
   },
   "devDependencies": {
     "dotenv": "^16.4.5"
