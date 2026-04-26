@@ -1,23 +1,3 @@
-/**
- * services/supabase.js
- *
- * Supabase client + all DB access helpers.
- *
- * CHANGE LOG (v2)
- * ───────────────
- * - Added `payout_successful` boolean column support (default false in DB).
- * - Added `setPayoutSuccessful(escrowId)` — called after a confirmed payout.
- * - Added `getSettledUnpaidEscrows()` — used by the startup recovery routine.
- * - `PENDING_FUNDING → PENDING_FUNDING` self-transition re-added to
- *   VALID_TRANSITIONS to allow blink_payment_hash to be stamped atomically.
- *
- * REQUIRED SCHEMA MIGRATION (run once in Supabase SQL editor)
- * ────────────────────────────────────────────────────────────
- *   ALTER TABLE escrows
- *     ADD COLUMN IF NOT EXISTS payout_successful BOOLEAN NOT NULL DEFAULT false,
- *     ADD COLUMN IF NOT EXISTS updated_at        TIMESTAMPTZ DEFAULT NOW();
- */
-
 'use strict';
 
 const { createClient } = require('@supabase/supabase-js');

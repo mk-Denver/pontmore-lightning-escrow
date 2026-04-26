@@ -1,16 +1,3 @@
-/**
- * bot.js — THE ULTIMATE MASTER V5 (Fort Knox Edition)
- *
- * CHANGE LOG (v5)
- * ───────────────
- * 10. RE-ENTRANCY GUARDS — BOLT11 text handlers now instantly clear state and 
- * perform strict DB double-checks to prevent malicious double-paste payouts.
- * 11. CRON JOB MUTEX LOCKS — Prevents overlapping background tasks.
- * 12. ZOMBIE CLEANUP — Added daily cron to wipe unpaid 24h+ escrows.
- * 13. MAX AMOUNT LIMIT — Hard cap of KES 500,000 to prevent API integer overflows.
- * 14. MARKDOWN FIX — Removed double-asterisks on receipt variables to fix TG 400 errors.
- */
-
 'use strict';
 
 // ─── Fail-fast env validation ────────────────────────────────────────────────

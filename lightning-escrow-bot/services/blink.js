@@ -1,10 +1,3 @@
-/**
- * services/blink.js
- *
- * All interactions with the Blink Lightning API (https://dev.blink.sv).
- * Now includes real-time fiat price fetching using currencyConversionEstimation.
- */
-
 'use strict';
 
 const { config } = require('../config/env');
