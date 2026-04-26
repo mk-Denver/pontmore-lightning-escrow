@@ -881,6 +881,7 @@ bot.on('text', async (ctx) => {
       
       const botUsername = ctx.botInfo?.username ?? 'this_bot';
       const inviteLink  = `https://t.me/${botUsername}?start=${DEEP_LINK_PREFIX}${escrow.escrow_id}`;
+      const safeLink    = escapeMd(inviteLink);
       const { buyerFeeSats } = splitPlatformFee(escrow.platform_fee_sats);
       const amountKes    = await satsToKes(escrow.amount_sats);
       const safeDesc     = escapeMd(escrow.trade_description);
@@ -896,7 +897,7 @@ bot.on('text', async (ctx) => {
         `*Amount:* ${escrow.amount_sats.toLocaleString()} sats (~KES ${amountKes.toLocaleString()})\n` +
         `${creatorFeeNote}\n` +
         `*Trade:* ${safeDesc}\n\n` +
-        `📤 *Share this invite link with your counterparty:*\n${inviteLink}`,
+        `📤 *Share this invite link with your counterparty:*\n${safeLink}`,
         { 
           parse_mode: 'Markdown', disable_web_page_preview: true,
           ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Amount', `edit_amount:${escrow.escrow_id}`)]])
