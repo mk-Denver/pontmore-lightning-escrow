@@ -1,0 +1,14 @@
+{
+  "name": "lightning-escrow-bot-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Workspace wrapper for the nested lightning-escrow-bot package",
+  "workspaces": [
+    "lightning-escrow-bot"
+  ],
+  "scripts": {
+    "install:bot": "npm install --prefix lightning-escrow-bot",
+    "start": "npm --prefix lightning-escrow-bot start",
+    "dev": "npm --prefix lightning-escrow-bot run dev"
+  }
+}

@@ -229,6 +229,31 @@ async function getEscrowById(escrowId) {
 }
 
 /**
+ * Update escrow amount and platform fee while escrow is still in CREATED state.
+ * This prevents amount changes once a counterparty has joined or funds are in play.
+ */
+async function updateEscrowAmount(escrowId, amountSats, platformFeeSats) {
+  const escrow = await getEscrowById(escrowId);
+  if (escrow.state !== 'CREATED') {
+    throw new StateConflictError(escrowId, 'CREATED');
+  }
+
+  const { data, error } = await supabase
+    .from('escrows')
+    .update({
+      amount_sats: amountSats,
+      platform_fee_sats: platformFeeSats,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('escrow_id', escrowId)
+    .select('*, creator:users!creator_id(*), invitee:users!invitee_id(*)')
+    .single();
+
+  if (error) throw new Error(`[supabase] updateEscrowAmount failed: ${error.message}`);
+  return data;
+}
+
+/**
  * Claim the invitee slot.  Validates CREATED state, no existing invitee,
  * and prevents self-invite — all before the UPDATE so the failure is
  * informative rather than a silent constraint violation.
@@ -391,6 +416,7 @@ module.exports = {
   // Escrow
   createEscrow,
   getEscrowById,
+  updateEscrowAmount,
   setEscrowInvitee,
   transitionEscrowState,
   // Payout tracking
@@ -399,4 +425,7 @@ module.exports = {
   // Counters
   incrementCompletedTrades,
   incrementDisputedTrades,
+  // Expiry cleanup
+  getExpiredFundedEscrows,
+  getExpiredPendingEscrows,
 };
