@@ -9,17 +9,20 @@
 *,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
 .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid var(--border); margin-bottom: 24px; flex-wrap: wrap; gap: 12px; }
 header h1 { font-size: 1.3rem; font-weight: 600; }
-header .wallet { display: flex; align-items: center; gap: 10px; }
-.btn { padding: 8px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text); cursor: pointer; font-size: 0.85rem; transition: background 0.15s; }
+.auth-section { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.auth-option { display: flex; align-items: center; gap: 6px; }
+.btn { padding: 8px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--text); cursor: pointer; font-size: 0.85rem; transition: background 0.15s; white-space: nowrap; }
 .btn:hover { background: var(--border); }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-primary:hover { background: #6a4fe0; }
 .btn-danger { background: var(--red); border-color: var(--red); color: #fff; font-size: 0.8rem; padding: 4px 12px; }
 .btn-danger:hover { background: #e05b5b; }
 .btn-sm { padding: 4px 10px; font-size: 0.78rem; }
-.tabs { display: flex; gap: 4px; margin-bottom: 20px; }
+.nsec-input { padding: 7px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 0.78rem; width: 280px; font-family: monospace; }
+.nsec-input::placeholder { color: var(--muted); }
+.tabs { display: flex; gap: 4px; margin-bottom: 20px; flex-wrap: wrap; }
 .tab { padding: 6px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); color: var(--muted); cursor: pointer; font-size: 0.82rem; }
 .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 table { width: 100%; border-collapse: collapse; }
@@ -55,6 +58,7 @@ tbody tr:hover { background: var(--border); }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; margin-right: 6px; vertical-align: middle; }
 @keyframes spin { to { transform: rotate(360deg); } }
 code { background: #1f1f2a; padding: 1px 5px; border-radius: 3px; font-size: 0.8rem; }
+.auth-hint { font-size: 0.72rem; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -64,9 +68,14 @@ code { background: #1f1f2a; padding: 1px 5px; border-radius: 3px; font-size: 0.8
     <h1>Escrow Operator Dashboard</h1>
     <div style="font-size:0.78rem;color:var(--muted);margin-top:2px">pontmore_escrow_http_v1 &middot; single_funder custodial</div>
   </div>
-  <div class="wallet">
-    <span id="wallet-status" style="font-size:0.8rem;color:var(--muted)">Wallet not connected</span>
-    <button class="btn" id="connect-btn" onclick="connectWallet()">Connect Wallet</button>
+  <div class="auth-section" id="auth-section">
+    <div class="auth-option">
+      <input type="password" class="nsec-input" id="nsec-input" placeholder="nsec1…" autocomplete="off">
+      <button class="btn btn-primary" id="nsec-btn" onclick="connectNsec()">Sign In with nsec</button>
+    </div>
+    <span style="color:var(--muted);font-size:0.8rem">or</span>
+    <button class="btn" id="ext-btn" onclick="connectExtension()">Connect Extension</button>
+    <span id="wallet-status" style="font-size:0.8rem;color:var(--muted)"></span>
     <button class="btn hidden" id="load-btn" onclick="loadEscrows()">Load Escrows</button>
   </div>
 </header>
@@ -82,7 +91,7 @@ code { background: #1f1f2a; padding: 1px 5px; border-radius: 3px; font-size: 0.8
 </div>
 
 <div id="table-area">
-  <div class="empty" id="empty-state">Connect your wallet and click "Load Escrows" to list instances.</div>
+  <div class="empty" id="empty-state">Sign in with your nsec or connect a browser extension, then click "Load Escrows".</div>
   <table class="hidden" id="escrow-table">
     <thead><tr>
       <th>Escrow ID</th><th>State</th><th>Amount</th><th>Funder</th><th>Counterparty</th><th>Dispute</th><th>Updated</th>
@@ -92,13 +101,15 @@ code { background: #1f1f2a; padding: 1px 5px; border-radius: 3px; font-size: 0.8
 </div>
 
 <div id="detail-area"></div>
-
 <div id="toast-container"></div>
 </div>
 
-<script>
+<script type="module">
+import { secp256k1 } from 'https://esm.sh/@noble/curves@1.9.0/secp256k1';
+import { sha256 } from 'https://esm.sh/@noble/hashes@1.7.2/sha256';
+import { bech32 } from 'https://esm.sh/@scure/base@1.2.5';
+
 const DR = '/pontmore/v1/operator';
-const ES = '/pontmore/v1';
 
 const DISPUTE_CLASSES = {
   payment_not_received: 'Payment Not Received',
@@ -120,8 +131,12 @@ const RESOLUTION_MODES = {
 };
 
 let operatorPubkey = null;
+let operatorPrivkey = null; // hex, only set when using nsec
 let dataCache = [];
 let activeFilter = '';
+
+function hx(bytes) { return secp256k1.utils.bytesToHex(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)); }
+function bx(hex) { return secp256k1.utils.hexToBytes(hex); }
 
 function toast(msg, ok) {
   const el = document.createElement('div');
@@ -131,22 +146,72 @@ function toast(msg, ok) {
   setTimeout(() => el.remove(), 4000);
 }
 
-async function sha256Hex(str) {
-  const enc = new TextEncoder().encode(str);
-  const buf = await crypto.subtle.digest('SHA-256', enc);
-  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2,'0')).join('');
+function updateUi() {
+  const authed = !!operatorPubkey;
+  document.getElementById('nsec-input').classList.toggle('hidden', authed);
+  document.getElementById('nsec-btn').classList.toggle('hidden', authed);
+  document.getElementById('ext-btn').classList.toggle('hidden', authed);
+  document.getElementById('wallet-status').classList.toggle('hidden', !authed);
+  document.getElementById('load-btn').classList.toggle('hidden', !authed);
+  if (authed) {
+    document.getElementById('wallet-status').textContent = operatorPubkey.slice(0,10)+'…';
+    document.getElementById('empty-state').textContent = 'Click "Load Escrows" to list instances.';
+  }
 }
 
-async function connectWallet() {
+function connectNsec() {
+  const nsec = document.getElementById('nsec-input').value.trim();
+  if (!nsec) { toast('Enter your nsec', false); return; }
+  try {
+    const decoded = bech32.decodeToBytes(nsec);
+    if (decoded.prefix !== 'nsec') { toast('Not a valid nsec (prefix must be nsec1)', false); return; }
+    operatorPrivkey = hx(decoded.bytes);
+    operatorPubkey = hx(secp256k1.getPublicKey(operatorPrivkey));
+    document.getElementById('nsec-input').value = '';
+    document.getElementById('wallet-status').textContent = operatorPubkey.slice(0,10)+'…';
+    updateUi();
+    toast('Signed in as ' + operatorPubkey.slice(0,10) + '…', true);
+  } catch (e) { toast('Invalid nsec: ' + e.message, false); }
+}
+
+async function connectExtension() {
   if (!window.nostr) { toast('No NIP-07 extension found (nos2x, Alby, etc.)', false); return; }
   try {
+    operatorPrivkey = null;
     operatorPubkey = await window.nostr.getPublicKey();
-    document.getElementById('wallet-status').textContent = operatorPubkey.slice(0,10)+'...';
-    document.getElementById('connect-btn').classList.add('hidden');
-    document.getElementById('load-btn').classList.remove('hidden');
-    document.getElementById('empty-state').textContent = 'Click "Load Escrows" to list instances.';
-    toast('Wallet connected', true);
-  } catch(e) { toast('Failed to get pubkey: '+e.message, false); }
+    updateUi();
+    toast('Connected via extension', true);
+  } catch(e) { toast('Extension error: '+e.message, false); }
+}
+
+function computeEventId(event) {
+  const payload = JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]);
+  return hx(sha256(payload));
+}
+
+function signEventLocally(event) {
+  event.id = computeEventId(event);
+  event.sig = hx(secp256k1.schnorr.sign(bx(event.id), operatorPrivkey));
+  return event;
+}
+
+function signEventWithExtension(event) {
+  return window.nostr.signEvent(event);
+}
+
+async function signEvent(event) {
+  if (operatorPrivkey) return signEventLocally(event);
+  if (window.nostr) return signEventWithExtension(event);
+  throw new Error('nsec required for signing (no extension available)');
+}
+
+async function sha256HexBody(bodyStr) {
+  if (operatorPrivkey) {
+    return hx(sha256(bodyStr));
+  }
+  const enc = new TextEncoder().encode(bodyStr);
+  const buf = await crypto.subtle.digest('SHA-256', enc);
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2,'0')).join('');
 }
 
 async function signNip98Event(method, url, body) {
@@ -158,15 +223,15 @@ async function signNip98Event(method, url, body) {
     pubkey: operatorPubkey,
   };
   if (body) {
-    const payloadHash = await sha256Hex(typeof body === 'string' ? body : JSON.stringify(body));
-    event.tags.push(['payload', payloadHash]);
+    const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+    event.tags.push(['payload', await sha256HexBody(bodyStr)]);
   }
-  const signed = await window.nostr.signEvent(event);
+  const signed = await signEvent(event);
   return 'Nostr ' + btoa(JSON.stringify(signed));
 }
 
 async function operatorFetch(method, path, body) {
-  if (!operatorPubkey) { toast('Connect wallet first', false); throw new Error('no wallet'); }
+  if (!operatorPubkey) { toast('Sign in first', false); throw new Error('no auth'); }
   const url = window.location.origin + path;
   const auth = await signNip98Event(method, url, body);
   const headers = { Authorization: auth, 'Content-Type': 'application/json' };
@@ -178,8 +243,11 @@ async function operatorFetch(method, path, body) {
   return data;
 }
 
+window.connectNsec = connectNsec;
+window.connectExtension = connectExtension;
+
 async function loadEscrows() {
-  if (!operatorPubkey) { toast('Connect wallet first', false); return; }
+  if (!operatorPubkey) { toast('Sign in first', false); return; }
   document.getElementById('load-btn').innerHTML = '<span class="spinner"></span>Loading';
   try {
     let url = DR + '/escrows';
@@ -191,16 +259,18 @@ async function loadEscrows() {
   } catch(e) { toast(e.message, false); }
   finally { document.getElementById('load-btn').textContent = 'Load Escrows'; }
 }
+window.loadEscrows = loadEscrows;
 
 function setFilter(state) {
   activeFilter = state;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.state === state));
   loadEscrows();
 }
+window.setFilter = setFilter;
 
 function fmtSats(s) { return (s/1000).toFixed(0)+'k'; }
-function fmtDate(d) { return d ? new Date(d).toLocaleString() : '—'; }
-function fmtPubkey(pk) { return pk ? pk.slice(0,8)+'…'+pk.slice(-4) : '—'; }
+function fmtDate(d) { return d ? new Date(d).toLocaleString() : '\u2014'; }
+function fmtPubkey(pk) { return pk ? pk.slice(0,8)+'\u2026'+pk.slice(-4) : '\u2014'; }
 function renderLabel(obj, val) {
   for (const [k, v] of Object.entries(obj)) { if (k === val) return v; }
   return val;
@@ -211,18 +281,18 @@ function renderTable(rows) {
   tbody.innerHTML = rows.length === 0
     ? '<tr><td colspan="7" class="empty" style="text-align:center">No escrow instances match this filter.</td></tr>'
     : rows.map(r => `<tr onclick="showDetail('${r.escrow_id}')">
-        <td><code title="${r.escrow_id}">${r.escrow_id.slice(0,8)}…</code></td>
+        <td><code title="${r.escrow_id}">${r.escrow_id.slice(0,8)}\u2026</code></td>
         <td><span class="state-badge state-${r.state}">${r.state}</span></td>
         <td>${fmtSats(r.amount_sats)}</td>
         <td><span class="field-value pubkey">${fmtPubkey(r.creator_pubkey)}</span></td>
         <td><span class="field-value pubkey">${fmtPubkey(r.counterparty_pubkey)}</span></td>
-        <td>${r.dispute_class ? renderLabel(DISPUTE_CLASSES, r.dispute_class) : '—'}</td>
+        <td>${r.dispute_class ? renderLabel(DISPUTE_CLASSES, r.dispute_class) : '\u2014'}</td>
         <td>${fmtDate(r.updated_at)}</td>
       </tr>`).join('');
 }
 
 async function showDetail(escrowId) {
-  if (!operatorPubkey) { toast('Connect wallet first', false); return; }
+  if (!operatorPubkey) { toast('Sign in first', false); return; }
   try {
     const r = await operatorFetch('GET', DR + '/escrows/' + escrowId);
     const area = document.getElementById('detail-area');
@@ -235,22 +305,22 @@ async function showDetail(escrowId) {
 <div class="field"><div class="field-label">Amount</div><div class="field-value">${r.amount_sats} sats (${(r.amount_sats/100000000).toFixed(2)} BTC)</div></div>
 <div class="field"><div class="field-label">Platform Fee</div><div class="field-value">${r.platform_fee_sats} sats</div></div>
 <div class="field"><div class="field-label">Creator (Funder)</div><div class="field-value pubkey">${r.creator_pubkey}</div></div>
-<div class="field"><div class="field-label">Counterparty</div><div class="field-value pubkey">${r.counterparty_pubkey || '— (not joined)'}</div></div>
-<div class="field"><div class="field-label">Description</div><div class="field-value">${r.description || '—'}</div></div>
-<div class="field"><div class="field-label">Refund LN Address</div><div class="field-value">${r.refund_ln_address || '—'}</div></div>
-<div class="field"><div class="field-label">Payout LN Address</div><div class="field-value">${r.payout_ln_address || '—'}</div></div>
-<div class="field"><div class="field-label">Payout Successful</div><div class="field-value">${r.payout_successful ? '✅ Yes' : '❌ No'}</div></div>
-<div class="field"><div class="field-label">Invitation Token</div><div class="field-value"><code>${r.invitation_token || '—'}</code></div></div>
-<div class="field"><div class="field-label">Release Decision</div><div class="field-value">${r.release_decision_type || '—'}</div></div>
+<div class="field"><div class="field-label">Counterparty</div><div class="field-value pubkey">${r.counterparty_pubkey || '\u2014 (not joined)'}</div></div>
+<div class="field"><div class="field-label">Description</div><div class="field-value">${r.description || '\u2014'}</div></div>
+<div class="field"><div class="field-label">Refund LN Address</div><div class="field-value">${r.refund_ln_address || '\u2014'}</div></div>
+<div class="field"><div class="field-label">Payout LN Address</div><div class="field-value">${r.payout_ln_address || '\u2014'}</div></div>
+<div class="field"><div class="field-label">Payout Successful</div><div class="field-value">${r.payout_successful ? 'Yes' : 'No'}</div></div>
+<div class="field"><div class="field-label">Invitation Token</div><div class="field-value"><code>${r.invitation_token || '\u2014'}</code></div></div>
+<div class="field"><div class="field-label">Release Decision</div><div class="field-value">${r.release_decision_type || '\u2014'}</div></div>
 <div class="field"><div class="field-label">Created</div><div class="field-value">${fmtDate(r.created_at)}</div></div>
 <div class="field"><div class="field-label">Updated</div><div class="field-value">${fmtDate(r.updated_at)}</div></div>
 ${r.dispute_class ? `
 <div class="field"><div class="field-label">Dispute Class</div><div class="field-value">${renderLabel(DISPUTE_CLASSES, r.dispute_class)}</div></div>
-<div class="field"><div class="field-label">Dispute Opened By</div><div class="field-value pubkey">${r.dispute_opened_by || '—'}</div></div>
+<div class="field"><div class="field-label">Dispute Opened By</div><div class="field-value pubkey">${r.dispute_opened_by || '\u2014'}</div></div>
 <div class="field"><div class="field-label">Dispute Opened</div><div class="field-value">${fmtDate(r.dispute_opened_at)}</div></div>
-<div class="field"><div class="field-label">Dispute Summary</div><div class="field-value">${r.dispute_summary || '—'}</div></div>
-<div class="field"><div class="field-label">Resolution Mode</div><div class="field-value">${r.dispute_resolution_mode ? renderLabel(RESOLUTION_MODES, r.dispute_resolution_mode) : '—'}</div></div>
-<div class="field"><div class="field-label">Resolution Note</div><div class="field-value">${r.dispute_resolution_note || '—'}</div></div>
+<div class="field"><div class="field-label">Dispute Summary</div><div class="field-value">${r.dispute_summary || '\u2014'}</div></div>
+<div class="field"><div class="field-label">Resolution Mode</div><div class="field-value">${r.dispute_resolution_mode ? renderLabel(RESOLUTION_MODES, r.dispute_resolution_mode) : '\u2014'}</div></div>
+<div class="field"><div class="field-label">Resolution Note</div><div class="field-value">${r.dispute_resolution_note || '\u2014'}</div></div>
 <div class="field"><div class="field-label">Resolved At</div><div class="field-value">${fmtDate(r.dispute_resolved_at)}</div></div>
 ` : ''}
 
@@ -264,6 +334,7 @@ ${r.dispute_class ? `
     area.scrollIntoView({ behavior: 'smooth' });
   } catch(e) { toast(e.message, false); }
 }
+window.showDetail = showDetail;
 
 function showDisputeForm(escrowId) {
   const clsOpts = Object.entries(DISPUTE_CLASSES).map(([k,v]) => `<option value="${k}">${v}</option>`).join('');
@@ -283,6 +354,7 @@ function showDisputeForm(escrowId) {
   </div>
 </div>`;
 }
+window.showDisputeForm = showDisputeForm;
 
 async function fileDispute(escrowId) {
   try {
@@ -292,10 +364,11 @@ async function fileDispute(escrowId) {
       summary: document.getElementById('dc-summary').value,
     };
     const r = await operatorFetch('POST', DR + '/disputes', body);
-    toast('Dispute filed — state: ' + r.state, true);
+    toast('Dispute filed \u2014 state: ' + r.state, true);
     showDetail(escrowId);
   } catch(e) { toast(e.message, false); }
 }
+window.fileDispute = fileDispute;
 
 function showResolveForm(escrowId) {
   const modeOpts = Object.entries(RESOLUTION_MODES).map(([k,v]) => `<option value="${k}">${v}</option>`).join('');
@@ -322,6 +395,7 @@ function showResolveForm(escrowId) {
   </div>
 </div>`;
 }
+window.showResolveForm = showResolveForm;
 
 async function resolveDispute(escrowId) {
   try {
@@ -331,10 +405,11 @@ async function resolveDispute(escrowId) {
       note: document.getElementById('rs-note').value,
     };
     const r = await operatorFetch('POST', DR + '/disputes/' + escrowId + '/resolve', body);
-    toast('Dispute resolved — state: ' + r.state, true);
+    toast('Dispute resolved \u2014 state: ' + r.state, true);
     showDetail(escrowId);
   } catch(e) { toast(e.message, false); }
 }
+window.resolveDispute = resolveDispute;
 </script>
 </body>
 </html>
