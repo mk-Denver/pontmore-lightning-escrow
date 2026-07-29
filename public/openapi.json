@@ -1,0 +1,341 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pontmore Escrow HTTP Service",
+    "version": "1.0.0",
+    "description": "Normative wire contract for pontmore_escrow_http_v1. Implements PIP-01 standalone service interface: create, funding_instructions, fund_status, release, refund, cancel. Authentication uses NIP-98 (nostr_http_auth)."
+  },
+  "servers": [
+    { "url": "https://escrow.example.com/pontmore/v1" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "nostr_http_auth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "Nostr",
+        "description": "NIP-98 HTTP Authentication. Client sends 'Authorization: Nostr <base64 JSON event>' where the event is kind 27235 with tags ['u', '<full request URL>'] and ['method', '<HTTP method>']."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" }
+        }
+      },
+      "CreateRequest": {
+        "type": "object",
+        "properties": {
+          "amount_sats": { "type": "integer", "minimum": 1, "description": "Escrow amount in satoshis" },
+          "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "refund_ln_address": { "type": "string", "description": "Lightning Address for refund payout" },
+          "idempotency_key": { "type": "string", "description": "Correlation value for request deduplication only; does not authorize participant joining" },
+          "invitation_token": { "type": "string", "description": "Service-issued invitation/enrollment token for participant joining. When present, this request enrolls the caller as the counterparty of an existing instance." }
+        },
+        "required": ["amount_sats"]
+      },
+      "CreateResponse": {
+        "type": "object",
+        "required": ["escrow_id", "state", "creator_pubkey", "amount_sats", "funding_model", "invitation_token"],
+        "properties": {
+          "escrow_id": { "type": "string", "format": "uuid" },
+          "state": { "type": "string", "enum": ["CREATED", "PENDING_FUNDING"] },
+          "creator_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "counterparty_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true },
+          "amount_sats": { "type": "integer" },
+          "platform_fee_sats": { "type": "integer" },
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"] },
+          "invitation_token": { "type": "string", "description": "Token a counterparty must present to join this instance" }
+        }
+      },
+      "FundingInstructionsResponse": {
+        "type": "object",
+        "required": ["escrow_id", "payment_hash", "payment_request", "amount_sats"],
+        "properties": {
+          "escrow_id": { "type": "string", "format": "uuid" },
+          "payment_hash": { "type": "string" },
+          "payment_request": { "type": "string", "description": "BOLT11 invoice the funder must pay" },
+          "amount_sats": { "type": "integer", "description": "Total invoice amount including platform fee" }
+        }
+      },
+      "FundStatusResponse": {
+        "type": "object",
+        "required": ["escrow_id", "state", "funded"],
+        "properties": {
+          "escrow_id": { "type": "string", "format": "uuid" },
+          "state": { "type": "string", "enum": ["CREATED", "PENDING_FUNDING", "FUNDED", "DISPUTED", "SETTLED", "CANCELLED"] },
+          "funded": { "type": "boolean" },
+          "invoice_status": { "type": "string", "nullable": true }
+        }
+      },
+      "SignatureEntry": {
+        "type": "object",
+        "required": ["pubkey", "signature"],
+        "properties": {
+          "pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "signature": { "type": "string", "pattern": "^[0-9a-f]{128}$", "description": "BIP-340 Schnorr signature over sha256 of the canonical message" }
+        }
+      },
+      "ReleaseDecisionRequest": {
+        "type": "object",
+        "required": ["release_decision", "recipient", "nonce", "timestamp", "signatures"],
+        "properties": {
+          "release_decision": { "type": "string", "enum": ["mutual_consent", "operator_decision", "oracle_signature", "application_signed_result", "threshold_participant_signatures"] },
+          "recipient": { "type": "string", "enum": ["creator", "counterparty"], "description": "Which bound participant receives the release" },
+          "nonce": { "type": "string", "description": "Unique per decision; replay protection" },
+          "timestamp": { "type": "integer", "description": "Unix seconds" },
+          "result": { "type": "object", "nullable": true, "description": "Verifiable result payload (required for application_signed_result)" },
+          "threshold": { "type": "integer", "minimum": 1, "nullable": true, "description": "Required signature count for threshold_participant_signatures" },
+          "oracle_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true, "description": "Referenced oracle pubkey for oracle_signature" },
+          "signatures": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SignatureEntry" }
+          }
+        }
+      },
+      "ReleaseResponse": {
+        "type": "object",
+        "required": ["escrow_id", "state", "recipient", "payout_sats", "payout"],
+        "properties": {
+          "escrow_id": { "type": "string", "format": "uuid" },
+          "state": { "type": "string", "enum": ["SETTLED"] },
+          "recipient": { "type": "string", "enum": ["creator", "counterparty"] },
+          "payout_sats": { "type": "integer" },
+          "payout": { "type": "object" }
+        }
+      },
+      "RefundResponse": {
+        "type": "object",
+        "required": ["escrow_id", "state", "recipient", "refund_sats", "payout"],
+        "properties": {
+          "escrow_id": { "type": "string", "format": "uuid" },
+          "state": { "type": "string", "enum": ["CANCELLED"] },
+          "recipient": { "type": "string", "enum": ["creator"] },
+          "refund_sats": { "type": "integer" },
+          "payout": { "type": "object" }
+        }
+      },
+      "CancelResponse": {
+        "type": "object",
+        "required": ["escrow_id", "state"],
+        "properties": {
+          "escrow_id": { "type": "string", "format": "uuid" },
+          "state": { "type": "string", "enum": ["CANCELLED"] }
+        }
+      },
+      "CanonicalMessage": {
+        "type": "string",
+        "description": "The string each signer signs: pontmore-escrow:v1:<escrow_id>:<action>:<recipient>:<result_hash>:<nonce>:<timestamp>. The signature is BIP-340 Schnorr over sha256(canonical_message)."
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "NIP-98 authentication failed",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "Conflict": {
+        "description": "State conflict or concurrent modification",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      },
+      "NotFound": {
+        "description": "Escrow instance not found",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } }
+      }
+    }
+  },
+  "security": [{ "nostr_http_auth": [] }],
+  "paths": {
+    "/create": {
+      "post": {
+        "summary": "create",
+        "description": "Open a new escrow instance and bind the creator's pubkey. The initial authenticated request establishes the instance. Any later participant join MUST use a service-issued invitation token plus the joining participant's authenticated request. Repeated calls with the same idempotency_key are idempotent and MUST NOT create a second instance.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateRequest" } } } },
+        "responses": {
+          "200": { "description": "Escrow instance created or existing instance returned (idempotent)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateResponse" } } } },
+          "400": { "description": "Validation error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/funding_instructions": {
+      "post": {
+        "summary": "funding_instructions",
+        "description": "Retrieve the funding instructions (BOLT11 invoice) needed to fund the escrow instance. Idempotent: returns the existing invoice if already generated.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["escrow_id"],
+                "properties": { "escrow_id": { "type": "string", "format": "uuid" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Funding instructions", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FundingInstructionsResponse" } } } },
+          "400": { "description": "Validation error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/fund_status": {
+      "post": {
+        "summary": "fund_status",
+        "description": "Observe the funding state of a participant's side. Transitions PENDING_FUNDING→FUNDED when the invoice is paid, or PENDING_FUNDING→CANCELLED when expired.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["escrow_id"],
+                "properties": { "escrow_id": { "type": "string", "format": "uuid" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Funding status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FundStatusResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/release": {
+      "post": {
+        "summary": "release",
+        "description": "Request release of the escrowed amount to the recipient. Requires a verified release decision whose format is in the descriptor service.release_decisions. Each signature is a BIP-340 Schnorr signature over sha256(canonical_message).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["escrow_id"],
+                "properties": {
+                  "escrow_id": { "type": "string", "format": "uuid" },
+                  "decision": { "$ref": "#/components/schemas/ReleaseDecisionRequest" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Release accepted and payout executed or pending", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ReleaseResponse" } } } },
+          "400": { "description": "Validation or decision-verification error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/refund": {
+      "post": {
+        "summary": "refund",
+        "description": "Request refund of the escrowed amount to the funder. Requires a verified release decision of action 'refund'. Refund recipient must be 'creator' (the funder in single_funder model).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["escrow_id"],
+                "properties": {
+                  "escrow_id": { "type": "string", "format": "uuid" },
+                  "decision": { "$ref": "#/components/schemas/ReleaseDecisionRequest" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Refund accepted and payout executed or pending", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RefundResponse" } } } },
+          "400": { "description": "Validation or decision-verification error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/cancel": {
+      "post": {
+        "summary": "cancel",
+        "description": "Request cancellation of an unfunded or unresolved escrow instance. Cannot cancel a funded escrow; use refund with a valid decision instead.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["escrow_id"],
+                "properties": { "escrow_id": { "type": "string", "format": "uuid" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Escrow cancelled", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CancelResponse" } } } },
+          "400": { "description": "Validation error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    }
+  },
+  "x-pontmore-state-machine": {
+    "transitions": {
+      "CREATED": ["PENDING_FUNDING", "CANCELLED"],
+      "PENDING_FUNDING": ["PENDING_FUNDING", "FUNDED", "CANCELLED"],
+      "FUNDED": ["SETTLED", "DISPUTED", "CANCELLED"],
+      "DISPUTED": ["SETTLED", "CANCELLED"],
+      "SETTLED": [],
+      "CANCELLED": []
+    },
+    "terminal_states": ["SETTLED", "CANCELLED"]
+  },
+  "x-pontmore-idempotency": {
+    "description": "The idempotency_key in create is a correlation value used to deduplicate retries. It MUST NOT authorize participant joining or bind any additional pubkeys. Repeated create calls with the same idempotency_key return the existing instance and do not create a second one.",
+    "shared_correlation_field": "idempotency_key"
+  },
+  "x-pontmore-funding-model": {
+    "single_funder": {
+      "description": "One participant (creator) funds the escrow. Counterparty joins via invitation_token. Release recipient can be creator or counterparty.",
+      "wire_fields": { "funding_threshold": "not used", "participant_count": "not used" }
+    },
+    "two_party": {
+      "description": "Two participants each fund a side of the same escrow instance.",
+      "wire_fields": { "funding_threshold": "not used", "participant_count": "2" }
+    },
+    "n_of_m": {
+      "description": "M of N required funders. Schema MUST expose funding_threshold (M) and participant_count (N).",
+      "wire_fields": { "funding_threshold": "M, minimum required funders", "participant_count": "N, total declared participants" }
+    }
+  },
+  "x-pontmore-release-decisions": {
+    "canonical_message": "pontmore-escrow:v1:<escrow_id>:<action>:<recipient>:<result_hash>:<nonce>:<timestamp>",
+    "action_values": ["release", "refund"],
+    "recipient_values": ["creator", "counterparty"],
+    "formats": {
+      "mutual_consent": "Release or refund authorized by all declared participants.",
+      "operator_decision": "Release or refund authorized by the escrow operator as arbiter.",
+      "oracle_signature": "Release or refund authorized by a signature from a referenced oracle. The schema MUST name the referenced oracle explicitly and bind the decision to that oracle's public key.",
+      "application_signed_result": "Release or refund authorized by a signed result from the originating application. Signed payload MUST include escrow identifier and result identifier/hash; signatures are BIP-340 Schnorr.",
+      "threshold_participant_signatures": "Release or refund authorized by a threshold of participant signatures. Schema MUST define the threshold value and the location of the participant signatures."
+    }
+  },
+  "x-pontmore-schema-fetch": {
+    "https_only": true,
+    "redirect_limit": 5,
+    "max_response_bytes": 1048576,
+    "allowed_content_types": ["application/json"],
+    "reject_disallowed_network_destinations": true,
+    "disallowed": ["loopback", "private", "link-local", "multicast", "unspecified"]
+  }
+}

@@ -1,14 +1,26 @@
 {
-  "name": "lightning-escrow-bot-workspace",
-  "private": true,
+  "name": "pontmore-escrow-service",
   "version": "1.0.0",
-  "description": "Workspace wrapper for the nested lightning-escrow-bot package",
-  "workspaces": [
-    "lightning-escrow-bot"
-  ],
+  "description": "Pontmore PIP-01 conformant custodial escrow service over HTTPS with NIP-98 auth",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
-    "install:bot": "npm install --prefix lightning-escrow-bot",
-    "start": "npm --prefix lightning-escrow-bot start",
-    "dev": "npm --prefix lightning-escrow-bot run dev"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "publish": "node scripts/publish-descriptor.js --publish"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.6.0",
+    "@noble/hashes": "^1.5.0",
+    "@scure/base": "^1.1.9",
+    "@supabase/supabase-js": "^2.43.4",
+    "express": "^4.19.2",
+    "node-cron": "^4.2.1",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.5"
   }
 }
