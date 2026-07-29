@@ -333,6 +333,86 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Descriptor management (operator only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Get the current descriptor as served (with live endpoint/schema_url rewrites).
+app.get(path.join(PREFIX, 'operator', 'descriptor'), (_req, res) => {
+  const descriptorPath = path.join(__dirname, 'public', 'descriptor.json');
+  const descriptor = JSON.parse(fs.readFileSync(descriptorPath, 'utf8'));
+  if (descriptor.service) {
+    descriptor.service.endpoint          = config.SERVICE_ENDPOINT;
+    descriptor.service.schema_url        = config.SCHEMA_URL;
+    descriptor.service.transport         = ['https'];
+    descriptor.service.interface         = config.SERVICE_INTERFACE;
+    descriptor.service.operations        = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
+    descriptor.service.auth              = ['nostr_http_auth'];
+    descriptor.service.funding_model     = config.FUNDING_MODEL;
+    descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
+  }
+  descriptor.updated_at = Math.floor(Date.now() / 1000);
+  res.json(descriptor);
+});
+
+// Publish a signed kind 30361 descriptor event to Nostr relays. The operator
+// signs the event client-side; this endpoint is a relay broadcast proxy.
+app.post(path.join(PREFIX, 'operator', 'publish'), requireBackend, requireNostrAuth, requireOperator, async (req, res) => {
+  try {
+    const { event } = req.body;
+    if (!event || !event.id || !event.sig || event.kind !== 30361) {
+      return res.status(400).json({ error: 'body must contain a signed kind 30361 Nostr event as "event"' });
+    }
+
+    const relays = ['wss://nos.lol', 'wss://relay.damus.io'];
+    const results = [];
+
+    // Broadcast via poc.pontmore.xyz API (HTTP proxy, faster)
+    try {
+      const pocRes = await fetch('https://poc.pontmore.xyz/api/escrows/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ relays, event }),
+      });
+      const pocJson = await pocRes.json();
+      if (Array.isArray(pocJson.results)) results.push(...pocJson.results);
+      else results.push(...pocJson);
+    } catch (err) {
+      console.warn('[publish] poc.pontmore.xyz proxy failed:', err.message);
+    }
+
+    // Fallback: direct WebSocket broadcast for any relays not covered above
+    const covered = new Set(results.map((r) => r.relay));
+    for (const relay of relays) {
+      if (covered.has(relay)) continue;
+      try {
+        const WebSocket = require('ws');
+        const ws = new WebSocket(relay);
+        await new Promise((resolve) => {
+          let result = null;
+          ws.on('open', () => ws.send(JSON.stringify(['EVENT', event])));
+          ws.on('message', (data) => {
+            try {
+              const [type, , ok, msg] = JSON.parse(data.toString());
+              if (type === 'OK') result = { relay, ok, message: msg || '' };
+            } catch {}
+          });
+          ws.on('error', (err) => { result = { relay, ok: false, message: err.message }; resolve(); });
+          ws.on('close', () => resolve());
+          setTimeout(() => { try { ws.close(); } catch {} resolve(); }, 8000);
+        });
+        results.push(result || { relay, ok: false, message: 'no response' });
+      } catch (err) {
+        results.push({ relay, ok: false, message: err.message });
+      }
+    }
+
+    res.json({ event_id: event.id, results });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Error handling
 // ─────────────────────────────────────────────────────────────────────────────
 

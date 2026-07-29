@@ -88,6 +88,21 @@ code { background: #1f1f2a; padding: 1px 5px; border-radius: 3px; font-size: 0.8
   <div class="tab" data-state="DISPUTED" onclick="setFilter('DISPUTED')">Disputed</div>
   <div class="tab" data-state="SETTLED" onclick="setFilter('SETTLED')">Settled</div>
   <div class="tab" data-state="CANCELLED" onclick="setFilter('CANCELLED')">Cancelled</div>
+  <div class="tab" data-mode="descriptor" onclick="showDescriptorTab()">Descriptor</div>
+</div>
+
+<div id="descriptor-panel" class="detail-panel hidden">
+  <h2>Escrow Descriptor <span style="font-size:0.78rem;color:var(--muted);font-weight:400">kind 30361</span></h2>
+  <div class="form-group">
+    <label>Descriptor JSON (edit and publish)</label>
+    <textarea id="descriptor-json" style="width:100%;min-height:400px;font-family:monospace;font-size:0.78rem;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);padding:12px"></textarea>
+  </div>
+  <div class="actions">
+    <button class="btn" onclick="loadDescriptor()">Refresh from Server</button>
+    <button class="btn btn-primary" onclick="publishDescriptor()">Publish to Nostr</button>
+    <span id="publish-status" style="font-size:0.8rem;color:var(--muted)"></span>
+  </div>
+  <div id="publish-results" style="margin-top:12px"></div>
 </div>
 
 <div id="table-area">
@@ -105,7 +120,7 @@ code { background: #1f1f2a; padding: 1px 5px; border-radius: 3px; font-size: 0.8
 </div>
 
 <script type="module">
-import { secp256k1 } from 'https://esm.sh/@noble/curves@1.9.0/secp256k1';
+import { secp256k1, schnorr } from 'https://esm.sh/@noble/curves@1.9.0/secp256k1';
 import { sha256 } from 'https://esm.sh/@noble/hashes@1.7.2/sha256';
 import { bech32 } from 'https://esm.sh/@scure/base@1.2.5';
 
@@ -135,8 +150,8 @@ let operatorPrivkey = null; // hex, only set when using nsec
 let dataCache = [];
 let activeFilter = '';
 
-function hx(bytes) { return secp256k1.utils.bytesToHex(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)); }
-function bx(hex) { return secp256k1.utils.hexToBytes(hex); }
+function hx(bytes) { return Array.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).map(b => b.toString(16).padStart(2, '0')).join(''); }
+function bx(hex) { const u = new Uint8Array(hex.length / 2); for (let i = 0; i < u.length; i++) u[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16); return u; }
 
 function toast(msg, ok) {
   const el = document.createElement('div');
@@ -166,7 +181,7 @@ function connectNsec() {
     const decoded = bech32.decodeToBytes(nsec);
     if (decoded.prefix !== 'nsec') { toast('Not a valid nsec (prefix must be nsec1)', false); return; }
     operatorPrivkey = hx(decoded.bytes);
-    operatorPubkey = hx(secp256k1.getPublicKey(operatorPrivkey));
+    operatorPubkey = hx(secp256k1.getPublicKey(operatorPrivkey)).slice(2);
     document.getElementById('nsec-input').value = '';
     document.getElementById('wallet-status').textContent = operatorPubkey.slice(0,10)+'…';
     updateUi();
@@ -191,7 +206,7 @@ function computeEventId(event) {
 
 function signEventLocally(event) {
   event.id = computeEventId(event);
-  event.sig = hx(secp256k1.schnorr.sign(bx(event.id), operatorPrivkey));
+  event.sig = hx(schnorr.sign(bx(event.id), operatorPrivkey));
   return event;
 }
 
@@ -262,11 +277,76 @@ async function loadEscrows() {
 window.loadEscrows = loadEscrows;
 
 function setFilter(state) {
+  hideDescriptorPanel();
   activeFilter = state;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.state === state));
   loadEscrows();
 }
 window.setFilter = setFilter;
+
+function hideDescriptorPanel() {
+  document.getElementById('descriptor-panel').classList.add('hidden');
+  document.getElementById('table-area').classList.remove('hidden');
+}
+
+function showDescriptorTab() {
+  activeFilter = '';
+  document.getElementById('table-area').classList.add('hidden');
+  document.getElementById('detail-area').innerHTML = '';
+  document.getElementById('descriptor-panel').classList.remove('hidden');
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.mode === 'descriptor'));
+  loadDescriptor();
+}
+window.showDescriptorTab = showDescriptorTab;
+
+async function loadDescriptor() {
+  document.getElementById('descriptor-json').value = 'Loading...';
+  try {
+    const data = await (await fetch('/pontmore/v1/operator/descriptor')).json();
+    document.getElementById('descriptor-json').value = JSON.stringify(data, null, 2);
+  } catch (e) {
+    document.getElementById('descriptor-json').value = 'Failed to load: ' + e.message;
+  }
+}
+window.loadDescriptor = loadDescriptor;
+
+async function publishDescriptor() {
+  if (!operatorPubkey) { toast('Sign in first', false); return; }
+  const el = document.getElementById('publish-status');
+  el.textContent = 'Signing...';
+  try {
+    const descriptor = JSON.parse(document.getElementById('descriptor-json').value);
+    descriptor.updated_at = Math.floor(Date.now() / 1000);
+
+    const event = {
+      kind: 30361,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['d', 'escrow'], ['network', 'lightning']],
+      content: JSON.stringify(descriptor),
+      pubkey: operatorPubkey,
+    };
+
+    const signed = operatorPrivkey ? signEventLocally(event) : await signEventWithExtension(event);
+
+    el.textContent = 'Broadcasting...';
+    const res = await operatorFetch('POST', DR + '/publish', { event: signed });
+    el.textContent = '';
+
+    const results = res.results || [];
+    let html = '<table style="font-size:0.8rem;width:100%"><tr><th>Relay</th><th>Status</th><th>Message</th></tr>';
+    for (const r of results) {
+      const ok = r.ok;
+      html += `<tr><td>${r.relay}</td><td style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? 'accepted' : 'rejected'}</td><td style="color:var(--muted)">${r.message || ''}</td></tr>`;
+    }
+    html += '</table>';
+    document.getElementById('publish-results').innerHTML = html;
+    toast('Published! Event id: ' + signed.id.slice(0,12) + '\u2026', true);
+  } catch (e) {
+    el.textContent = '';
+    toast('Publish failed: ' + e.message, false);
+  }
+}
+window.publishDescriptor = publishDescriptor;
 
 function fmtSats(s) { return (s/1000).toFixed(0)+'k'; }
 function fmtDate(d) { return d ? new Date(d).toLocaleString() : '\u2014'; }

@@ -119,6 +119,7 @@ const APPLICATION_SIGNER_PUBKEYS = (process.env.APPLICATION_SIGNER_PUBKEYS || ''
   .map(normalizePubkey);
 
 const OPERATOR_PUBKEY = normalizePubkey(optionalStringOrBlank('OPERATOR_PUBKEY'));
+const OPERATOR_NSEC   = optionalStringOrBlank('OPERATOR_NSEC'); // nsec or hex privkey, used for signing descriptor events
 
 // Canonical endpoint for the first advertised transport (https).
 const SERVICE_ENDPOINT = SERVICE_BASE_URL.replace(/\/$/, '') + SERVICE_PATH_PREFIX;
@@ -137,6 +138,7 @@ const config = Object.freeze({
   ACCEPTED_RELEASE_DECISIONS,
   APPLICATION_SIGNER_PUBKEYS,
   OPERATOR_PUBKEY,
+  OPERATOR_NSEC,
   NIP98_MAX_AGE_SECONDS,
   FIAT_CURRENCY,
 
