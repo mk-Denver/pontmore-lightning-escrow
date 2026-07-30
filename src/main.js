@@ -2,7 +2,10 @@
 
 const http = require('http');
 const { Readable } = require('stream');
-const app = require('../server.js');
+const { app, init } = require('../server.js');
+
+// Kick off backend init in the background; don't block the handler.
+init().catch((err) => console.error('[startup] background init failed:', err.message));
 
 module.exports = async ({ req, res, log, error }) => {
   const scheme = req.scheme || 'https';

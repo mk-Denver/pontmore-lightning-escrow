@@ -606,10 +606,14 @@ async function cleanupZombieEscrows() {
 // Startup
 // ─────────────────────────────────────────────────────────────────────────────
 
+let _initStarted = false;
+let _initDone = false;
 async function init() {
+  if (_initDone) return;
+  if (_initStarted) return;
+  _initStarted = true;
   console.log('[startup] Environment validated ✓');
   console.log(`[startup] Service interface: ${config.SERVICE_INTERFACE}`);
-  console.log(`[startup] Service endpoint: ${config.SERVICE_ENDPOINT}`);
   console.log(`[startup] Funding model:    ${config.FUNDING_MODEL}`);
   console.log(`[startup] Accepted models:  ${config.ACCEPTED_FUNDING_MODELS.join(', ')}`);
   console.log(`[startup] Release decisions: ${config.ACCEPTED_RELEASE_DECISIONS.join(', ')}`);
@@ -630,24 +634,20 @@ async function init() {
   } else {
     console.log('[startup] Skipping backend init (credentials blank). Descriptor + schema are still served.');
   }
+  _initDone = true;
 }
 
-module.exports = app;
+module.exports = { app, init };
 
 if (require.main === module) {
   init().then(() => {
     app.listen(config.PORT, () => {
       console.log(`[startup] Express listening on port ${config.PORT}`);
       console.log(`[startup] Descriptor:  ${config.SERVICE_ENDPOINT}/descriptor`);
-      console.log(`[startup] Schema URL:   ${config.SCHEMA_URL}`);
       console.log('[startup] Service ready. ⚡');
     });
   }).catch((err) => {
     console.error('[startup] FATAL:', err.message);
     process.exit(1);
-  });
-} else {
-  init().catch((err) => {
-    console.error('[startup] FATAL:', err.message);
   });
 }
