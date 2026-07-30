@@ -9,7 +9,6 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "build": "echo No build step required",
     "publish": "node scripts/publish-descriptor.js --publish"
   },
   "dependencies": {
