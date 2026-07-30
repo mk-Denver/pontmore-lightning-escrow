@@ -79,6 +79,7 @@ const VALID_TRANSITIONS = Object.freeze({
  * Create a new escrow instance in state CREATED.
  * `creator_pubkey` is the authenticated Nostr pubkey of the participant who
  * called `create`. In single_funder mode the creator is the funder.
+ * fundingThreshold and participantCount are stored for two_party / n_of_m.
  */
 async function createEscrowInstance({
   creatorPubkey,
@@ -86,6 +87,8 @@ async function createEscrowInstance({
   platformFeeSats,
   description,
   fundingModel,
+  fundingThreshold,
+  participantCount,
   refundLnAddress,
   idempotencyKey,
 }) {
@@ -111,6 +114,8 @@ async function createEscrowInstance({
       platform_fee_sats: platformFeeSats,
       description:       description ?? '',
       funding_model:     fundingModel,
+      funding_threshold: fundingThreshold ?? null,
+      participant_count: participantCount ?? null,
       refund_ln_address: refundLnAddress ?? null,
       idempotency_key:   idempotencyKey ?? null,
       invitation_token:  invitationToken,
@@ -143,8 +148,13 @@ async function getEscrowInstance(escrowId) {
 /**
  * Counterparty joins an escrow instance using a service-issued invitation token.
  * Binds the counterparty pubkey and transitions CREATED -> PENDING_FUNDING.
+ *
+ * For single_funder: one counterparty joins.
+ * For two_party: one counterparty joins (2 participants total).
+ * For n_of_m: multiple participants may join until participant_count is reached.
+ *             Each joiner is recorded as a funder row.
  */
-async function joinEscrowInstance(escrowId, invitationToken, counterpartyPubkey, payoutLnAddress) {
+async function joinEscrowInstance(escrowId, invitationToken, joinerPubkey, payoutLnAddress) {
   const db = supabase();
   const { data: existing, error: fetchErr } = await db
     .from('escrow_instances')
@@ -155,37 +165,204 @@ async function joinEscrowInstance(escrowId, invitationToken, counterpartyPubkey,
   if (!existing) throw new NotFoundError('Escrow instance', escrowId);
 
   if (existing.state !== 'CREATED') throw new StateConflictError(escrowId, 'CREATED');
-  if (existing.counterparty_pubkey) throw new ValidationError('Escrow instance already has a counterparty.');
-  if (existing.creator_pubkey === counterpartyPubkey) throw new ValidationError('Creator cannot be their own counterparty.');
+  if (existing.creator_pubkey === joinerPubkey) throw new ValidationError('Creator cannot join their own escrow as a counterparty.');
   if (existing.invitation_token !== invitationToken) throw new ValidationError('Invalid invitation token.');
 
-  const { data, error } = await db
-    .from('escrow_instances')
-    .update({
-      counterparty_pubkey: counterpartyPubkey,
-      payout_ln_address:   payoutLnAddress ?? null,
-      state:               'PENDING_FUNDING',
-      updated_at:          new Date().toISOString(),
-    })
-    .eq('escrow_id', escrowId)
-    .eq('state', 'CREATED')
-    .select()
-    .single();
+  const model = existing.funding_model;
 
-  if (error) throw new Error(`[supabase] joinEscrowInstance failed: ${error.message}`);
-  if (!data) throw new StateConflictError(escrowId, 'CREATED');
-  return data;
+  // single_funder & two_party: single counterparty slot.
+  if (model === 'single_funder' || model === 'two_party') {
+    if (existing.counterparty_pubkey) throw new ValidationError('Escrow instance already has a counterparty.');
+
+    const { data, error } = await db
+      .from('escrow_instances')
+      .update({
+        counterparty_pubkey: joinerPubkey,
+        payout_ln_address:   payoutLnAddress ?? null,
+        state:               'PENDING_FUNDING',
+        updated_at:          new Date().toISOString(),
+      })
+      .eq('escrow_id', escrowId)
+      .eq('state', 'CREATED')
+      .select()
+      .single();
+
+    if (error) throw new Error(`[supabase] joinEscrowInstance failed: ${error.message}`);
+    if (!data) throw new StateConflictError(escrowId, 'CREATED');
+
+    // For two_party, seed funder rows for both participants.
+    if (model === 'two_party') {
+      await seedFunderRow(db, escrowId, existing.creator_pubkey, 'creator',
+        existing.amount_sats, existing.platform_fee_sats, existing.refund_ln_address);
+      await seedFunderRow(db, escrowId, joinerPubkey, 'counterparty',
+        existing.amount_sats, existing.platform_fee_sats, payoutLnAddress);
+    }
+    return data;
+  }
+
+  // n_of_m: multiple participants. Counterparty field holds the last joiner,
+  // but all participants are tracked in escrow_funders.
+  if (model === 'n_of_m') {
+    const maxParticipants = existing.participant_count || 0;
+    const { data: existingFunders } = await db
+      .from('escrow_funders')
+      .select('funder_pubkey')
+      .eq('escrow_id', escrowId);
+    const currentCount = (existingFunders ?? []).length;
+
+    // Seed creator funder row on first join if not yet present.
+    if (currentCount === 0) {
+      await seedFunderRow(db, escrowId, existing.creator_pubkey, 'creator',
+        existing.amount_sats, existing.platform_fee_sats, existing.refund_ln_address);
+      currentCount + 1;
+    }
+
+    if (currentCount >= maxParticipants) {
+      throw new ValidationError(`Escrow instance already has ${maxParticipants} participants.`);
+    }
+    // Prevent duplicate joins
+    const alreadyJoined = (existingFunders ?? []).some(f => f.funder_pubkey === joinerPubkey);
+    if (alreadyJoined) throw new ValidationError('This pubkey has already joined this escrow instance.');
+
+    await seedFunderRow(db, escrowId, joinerPubkey, 'counterparty',
+      existing.amount_sats, existing.platform_fee_sats, payoutLnAddress);
+
+    const newCount = currentCount + 1;
+    const isFull = newCount >= maxParticipants;
+
+    const { data, error } = await db
+      .from('escrow_instances')
+      .update({
+        counterparty_pubkey: joinerPubkey,
+        payout_ln_address:   payoutLnAddress ?? null,
+        state:              isFull ? 'PENDING_FUNDING' : 'CREATED',
+        updated_at:         new Date().toISOString(),
+      })
+      .eq('escrow_id', escrowId)
+      .eq('state', 'CREATED')
+      .select()
+      .single();
+
+    if (error) throw new Error(`[supabase] joinEscrowInstance (n_of_m) failed: ${error.message}`);
+    if (!data) throw new StateConflictError(escrowId, 'CREATED');
+    return data;
+  }
+
+  throw new ValidationError(`Unknown funding model: ${model}`);
+}
+
+async function seedFunderRow(db, escrowId, funderPubkey, role, amountSats, platformFeeSats, refundLnAddress) {
+  const { error } = await db
+    .from('escrow_funders')
+    .insert({
+      escrow_id:         escrowId,
+      funder_pubkey:     funderPubkey,
+      funder_role:       role,
+      amount_sats:       amountSats,
+      platform_fee_sats: platformFeeSats,
+      refund_ln_address: refundLnAddress ?? null,
+    });
+  if (error) {
+    // unique constraint violation = already seeded; safe to ignore
+    if (!error.message.includes('duplicate')) {
+      throw new Error(`[supabase] seedFunderRow failed: ${error.message}`);
+    }
+  }
 }
 
 /**
  * Stamp the funding invoice (payment hash + request) onto a PENDING_FUNDING
  * instance. Uses a self-transition so it is safe to retry.
+ * For single_funder the invoice is stamped directly on the escrow row.
  */
 async function setFundingInvoice(escrowId, paymentHash, paymentRequest) {
   return transitionState(escrowId, 'PENDING_FUNDING', 'PENDING_FUNDING', {
     blink_payment_hash: paymentHash,
     blink_payment_request: paymentRequest,
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Funder-level operations (two_party / n_of_m)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Get or create a funder row for a specific participant.
+ */
+async function getFunderRow(escrowId, funderPubkey) {
+  const db = supabase();
+  const { data, error } = await db
+    .from('escrow_funders')
+    .select('*')
+    .eq('escrow_id', escrowId)
+    .eq('funder_pubkey', funderPubkey)
+    .maybeSingle();
+  if (error) throw new Error(`[supabase] getFunderRow failed: ${error.message}`);
+  return data;
+}
+
+/**
+ * Stamp a BOLT11 invoice onto a specific funder row. Idempotent.
+ */
+async function setFunderInvoice(escrowId, funderPubkey, paymentHash, paymentRequest) {
+  const db = supabase();
+  const { data, error } = await db
+    .from('escrow_funders')
+    .update({
+      blink_payment_hash:    paymentHash,
+      blink_payment_request: paymentRequest,
+      updated_at:            new Date().toISOString(),
+    })
+    .eq('escrow_id', escrowId)
+    .eq('funder_pubkey', funderPubkey)
+    .select()
+    .single();
+  if (error) throw new Error(`[supabase] setFunderInvoice failed: ${error.message}`);
+  return data;
+}
+
+/**
+ * Mark a specific funder row as funded.
+ */
+async function setFunderFunded(escrowId, funderPubkey) {
+  const db = supabase();
+  const { data, error } = await db
+    .from('escrow_funders')
+    .update({
+      funded:     true,
+      funded_at:  new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('escrow_id', escrowId)
+    .eq('funder_pubkey', funderPubkey)
+    .eq('funded', false)
+    .select()
+    .single();
+  if (error) throw new Error(`[supabase] setFunderFunded failed: ${error.message}`);
+  return data;
+}
+
+/**
+ * List all funder rows for an escrow instance.
+ */
+async function listFunders(escrowId) {
+  const db = supabase();
+  const { data, error } = await db
+    .from('escrow_funders')
+    .select('*')
+    .eq('escrow_id', escrowId);
+  if (error) throw new Error(`[supabase] listFunders failed: ${error.message}`);
+  return data ?? [];
+}
+
+/**
+ * Count funded vs total funders for an escrow instance.
+ */
+async function getFunderStats(escrowId) {
+  const funders = await listFunders(escrowId);
+  const fundedCount = funders.filter(f => f.funded).length;
+  const totalCount = funders.length;
+  return { fundedCount, totalCount, funders };
 }
 
 /**
@@ -352,4 +529,10 @@ module.exports = {
   listEscrowInstances,
   fileDispute,
   resolveDispute,
+  // Funder-level operations (two_party / n_of_m)
+  getFunderRow,
+  setFunderInvoice,
+  setFunderFunded,
+  listFunders,
+  getFunderStats,
 };

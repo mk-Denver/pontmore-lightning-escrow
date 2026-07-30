@@ -13,6 +13,8 @@ create table if not exists public.escrow_instances (
     escrow_id                  uuid        primary key default gen_random_uuid(),
     state                      text        not null default 'CREATED',
     funding_model              text        not null default 'single_funder',
+    funding_threshold          integer     check (funding_threshold is null or funding_threshold >= 1),
+    participant_count          integer     check (participant_count is null or participant_count >= 1),
     creator_pubkey             text        not null,
     counterparty_pubkey        text,
     amount_sats                integer     not null check (amount_sats > 0),
@@ -38,6 +40,38 @@ create table if not exists public.escrow_instances (
     created_at                 timestamptz not null default now(),
     updated_at                 timestamptz not null default now()
 );
+
+-- ============================================================================
+-- escrow_funders: per-funder contributions for two_party and n_of_m models.
+-- In single_funder the single invoice stays on escrow_instances.
+-- Each funder row tracks an individual BOLT11 invoice and payment status.
+-- ============================================================================
+create table if not exists public.escrow_funders (
+    funder_id              uuid        primary key default gen_random_uuid(),
+    escrow_id              uuid        not null references public.escrow_instances(escrow_id) on delete cascade,
+    funder_pubkey          text        not null,
+    funder_role            text        not null default 'participant',
+    amount_sats            integer     not null check (amount_sats > 0),
+    platform_fee_sats      integer     not null default 0 check (platform_fee_sats >= 0),
+    blink_payment_hash     text,
+    blink_payment_request  text,
+    funded                 boolean     not null default false,
+    funded_at              timestamptz,
+    refund_ln_address      text,
+    created_at             timestamptz not null default now(),
+    updated_at             timestamptz not null default now(),
+    unique (escrow_id, funder_pubkey)
+);
+
+create index if not exists idx_funders_escrow  on public.escrow_funders (escrow_id);
+create index if not exists idx_funders_pubkey  on public.escrow_funders (funder_pubkey);
+create index if not exists idx_funders_funded  on public.escrow_funders (escrow_id) where funded = true;
+
+drop trigger if exists trg_funders_updated_at on public.escrow_funders;
+create trigger trg_funders_updated_at
+    before update on public.escrow_funders
+    for each row
+    execute function public.set_updated_at();
 
 -- Indexes for common query patterns
 create index if not exists idx_escrow_state           on public.escrow_instances (state);
@@ -94,18 +128,20 @@ begin
     return query
     update public.escrow_instances
        set state                   = p_new_state,
-           updated_at              = now_ts,
-           -- conditionally set dispute timestamps
-           dispute_opened_at       = case when p_new_state = 'DISPUTED' then now_ts else dispute_opened_at end,
-           dispute_resolved_at     = case when p_expected_state = 'DISPUTED' and p_new_state in ('SETTLED', 'CANCELLED') then now_ts else dispute_resolved_at end,
-           -- apply p_extra columns (coalesce prefers explicit value, falls back to existing)
-           blink_payment_hash      = coalesce((p_extra->>'blink_payment_hash')::text,       blink_payment_hash),
-           blink_payment_request   = coalesce((p_extra->>'blink_payment_request')::text,    blink_payment_request),
-           dispute_class           = coalesce((p_extra->>'dispute_class')::text,            dispute_class),
-           dispute_opened_by       = coalesce((p_extra->>'dispute_opened_by')::text,        dispute_opened_by),
-           dispute_summary         = coalesce((p_extra->>'dispute_summary')::text,          dispute_summary),
-           dispute_resolution_mode = coalesce((p_extra->>'dispute_resolution_mode')::text,  dispute_resolution_mode),
-           dispute_resolution_note = coalesce((p_extra->>'dispute_resolution_note')::text,  dispute_resolution_note)
+            updated_at              = now_ts,
+            -- conditionally set dispute timestamps
+            dispute_opened_at       = case when p_new_state = 'DISPUTED' then now_ts else dispute_opened_at end,
+            dispute_resolved_at     = case when p_expected_state = 'DISPUTED' and p_new_state in ('SETTLED', 'CANCELLED') then now_ts else dispute_resolved_at end,
+            -- apply p_extra columns (coalesce prefers explicit value, falls back to existing)
+            blink_payment_hash      = coalesce((p_extra->>'blink_payment_hash')::text,       blink_payment_hash),
+            blink_payment_request   = coalesce((p_extra->>'blink_payment_request')::text,    blink_payment_request),
+            dispute_class           = coalesce((p_extra->>'dispute_class')::text,            dispute_class),
+            dispute_opened_by       = coalesce((p_extra->>'dispute_opened_by')::text,        dispute_opened_by),
+            dispute_summary         = coalesce((p_extra->>'dispute_summary')::text,          dispute_summary),
+            dispute_resolution_mode = coalesce((p_extra->>'dispute_resolution_mode')::text,  dispute_resolution_mode),
+            dispute_resolution_note = coalesce((p_extra->>'dispute_resolution_note')::text,  dispute_resolution_note),
+            funding_threshold       = coalesce((p_extra->>'funding_threshold')::int,         funding_threshold),
+            participant_count       = coalesce((p_extra->>'participant_count')::int,         participant_count)
     where escrow_id = p_escrow_id
       and state     = p_expected_state
     returning *;

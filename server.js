@@ -85,7 +85,9 @@ app.get(path.join(config.SERVICE_PATH_PREFIX, 'descriptor'), (_req, res) => {
     descriptor.service.interface  = config.SERVICE_INTERFACE;
     descriptor.service.operations = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
     descriptor.service.auth       = ['nostr_http_auth'];
-    descriptor.service.funding_model = config.FUNDING_MODEL;
+    descriptor.service.funding_model     = config.FUNDING_MODEL;
+    descriptor.service.funding_threshold = config.FUNDING_THRESHOLD;
+    descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
   }
   descriptor.updated_at = Math.floor(Date.now() / 1000);
@@ -348,6 +350,8 @@ app.get(path.join(PREFIX, 'operator', 'descriptor'), (_req, res) => {
     descriptor.service.operations        = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
     descriptor.service.auth              = ['nostr_http_auth'];
     descriptor.service.funding_model     = config.FUNDING_MODEL;
+    descriptor.service.funding_threshold = config.FUNDING_THRESHOLD;
+    descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
   }
   descriptor.updated_at = Math.floor(Date.now() / 1000);
@@ -407,6 +411,104 @@ app.post(path.join(PREFIX, 'operator', 'publish'), requireBackend, requireNostrA
     }
 
     res.json({ event_id: event.id, results });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+// Delete the escrow descriptor listing from Nostr relays.
+// The operator signs a kind 5 deletion event referencing the kind 30361
+// descriptor event id(s). Relays hide the referenced events upon seeing it.
+app.post(path.join(PREFIX, 'operator', 'unpublish'), requireBackend, requireNostrAuth, requireOperator, async (req, res) => {
+  try {
+    const { event_ids } = req.body;
+    if (!Array.isArray(event_ids) || event_ids.length === 0) {
+      return res.status(400).json({ error: 'body must contain a non-empty "event_ids" array of kind 30361 event ids to delete' });
+    }
+
+    // Build and sign the kind 5 deletion event using the operator key.
+    const { config } = require('./config/env');
+    const { schnorr } = require('@noble/curves/secp256k1');
+    const { sha256 } = require('@noble/hashes/sha256');
+    const { bech32 } = require('@scure/base');
+
+    function decodeNsec(nsec) {
+      if (!nsec) throw new Error('OPERATOR_NSEC is not set in .env');
+      if (/^[0-9a-f]{64}$/i.test(nsec)) return nsec.toLowerCase();
+      if (nsec.startsWith('nsec1')) {
+        const decoded = bech32.decodeToBytes(nsec);
+        if (decoded.prefix !== 'nsec') throw new Error('Not a valid nsec');
+        return Buffer.from(decoded.bytes).toString('hex');
+      }
+      throw new Error('OPERATOR_NSEC must be nsec1... or 64-char hex');
+    }
+
+    if (!config.OPERATOR_NSEC) {
+      return res.status(503).json({ error: 'OPERATOR_NSEC is not configured; cannot sign deletion event' });
+    }
+
+    const privkey = decodeNsec(config.OPERATOR_NSEC);
+    const pubkey  = Buffer.from(schnorr.getPublicKey(privkey)).toString('hex');
+
+    const tags = event_ids.map(id => ['e', id]);
+    tags.push(['k', '30361']);
+
+    const delEvent = {
+      kind: 5,
+      created_at: Math.floor(Date.now() / 1000),
+      tags,
+      content: 'Escrow service listing deleted by operator',
+      pubkey,
+    };
+
+    const canonical = JSON.stringify([0, delEvent.pubkey, delEvent.created_at, delEvent.kind, delEvent.tags, delEvent.content]);
+    delEvent.id  = Buffer.from(sha256(canonical)).toString('hex');
+    delEvent.sig = Buffer.from(schnorr.sign(Buffer.from(delEvent.id, 'hex'), privkey)).toString('hex');
+
+    const relays = ['wss://nos.lol', 'wss://relay.damus.io'];
+    const results = [];
+
+    // Broadcast via poc.pontmore.xyz API
+    try {
+      const pocRes = await fetch('https://poc.pontmore.xyz/api/escrows/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ relays, event: delEvent }),
+      });
+      const pocJson = await pocRes.json();
+      if (Array.isArray(pocJson.results)) results.push(...pocJson.results);
+      else results.push(...pocJson);
+    } catch (err) {
+      console.warn('[unpublish] poc.pontmore.xyz proxy failed:', err.message);
+    }
+
+    // Fallback: direct WebSocket broadcast
+    const covered = new Set(results.map((r) => r.relay));
+    for (const relay of relays) {
+      if (covered.has(relay)) continue;
+      try {
+        const WebSocket = require('ws');
+        const ws = new WebSocket(relay);
+        await new Promise((resolve) => {
+          let result = null;
+          ws.on('open', () => ws.send(JSON.stringify(['EVENT', delEvent])));
+          ws.on('message', (data) => {
+            try {
+              const [type, , ok, msg] = JSON.parse(data.toString());
+              if (type === 'OK') result = { relay, ok, message: msg || '' };
+            } catch {}
+          });
+          ws.on('error', (err) => { result = { relay, ok: false, message: err.message }; resolve(); });
+          ws.on('close', () => resolve());
+          setTimeout(() => { try { ws.close(); } catch {} resolve(); }, 8000);
+        });
+        results.push(result || { relay, ok: false, message: 'no response' });
+      } catch (err) {
+        results.push({ relay, ok: false, message: err.message });
+      }
+    }
+
+    res.json({ deletion_event_id: delEvent.id, deleted_event_ids: event_ids, results });
   } catch (err) {
     handleError(res, err);
   }

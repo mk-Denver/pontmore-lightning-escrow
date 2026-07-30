@@ -100,9 +100,25 @@ code { background: #1f1f2a; padding: 1px 5px; border-radius: 3px; font-size: 0.8
   <div class="actions">
     <button class="btn" onclick="loadDescriptor()">Refresh from Server</button>
     <button class="btn btn-primary" onclick="publishDescriptor()">Publish to Nostr</button>
+    <button class="btn btn-danger" onclick="deleteListing()">Delete Listing</button>
     <span id="publish-status" style="font-size:0.8rem;color:var(--muted)"></span>
   </div>
   <div id="publish-results" style="margin-top:12px"></div>
+  <div id="delete-form" class="hidden" style="margin-top:12px">
+    <div class="form-card">
+      <h3>Delete Escrow Service Listing</h3>
+      <p style="font-size:0.8rem;color:var(--muted);margin-bottom:12px">This broadcasts a kind 5 deletion event to Nostr relays, instructing them to hide your kind 30361 escrow descriptor event(s). Enter the event id(s) to delete (one per line).</p>
+      <div class="form-group">
+        <label>Event ID(s) to delete</label>
+        <textarea id="delete-event-ids" placeholder="30361 event id(s), one per line..." style="font-family:monospace;font-size:0.78rem;min-height:80px"></textarea>
+      </div>
+      <div class="actions">
+        <button class="btn btn-danger btn-sm" onclick="confirmDeleteListing()">Confirm Delete</button>
+        <button class="btn btn-sm" onclick="cancelDeleteListing()">Cancel</button>
+      </div>
+      <div id="delete-results" style="margin-top:12px"></div>
+    </div>
+  </div>
 </div>
 
 <div id="table-area">
@@ -347,6 +363,44 @@ async function publishDescriptor() {
   }
 }
 window.publishDescriptor = publishDescriptor;
+
+function deleteListing() {
+  if (!operatorPubkey) { toast('Sign in first', false); return; }
+  document.getElementById('delete-form').classList.remove('hidden');
+  document.getElementById('delete-results').innerHTML = '';
+}
+window.deleteListing = deleteListing;
+
+function cancelDeleteListing() {
+  document.getElementById('delete-form').classList.add('hidden');
+  document.getElementById('delete-event-ids').value = '';
+  document.getElementById('delete-results').innerHTML = '';
+}
+window.cancelDeleteListing = cancelDeleteListing;
+
+async function confirmDeleteListing() {
+  const raw = document.getElementById('delete-event-ids').value.trim();
+  if (!raw) { toast('Enter at least one event id', false); return; }
+  const event_ids = raw.split('\n').map(s => s.trim()).filter(Boolean);
+  const el = document.getElementById('delete-results');
+  el.innerHTML = '<span class="spinner"></span>Broadcasting deletion event...';
+  try {
+    const res = await operatorFetch('POST', DR + '/unpublish', { event_ids });
+    const results = res.results || [];
+    let html = '<table style="font-size:0.8rem;width:100%"><tr><th>Relay</th><th>Status</th><th>Message</th></tr>';
+    for (const r of results) {
+      const ok = r.ok;
+      html += `<tr><td>${r.relay}</td><td style="color:${ok ? 'var(--green)' : 'var(--red)'}">${ok ? 'deleted' : 'rejected'}</td><td style="color:var(--muted)">${r.message || ''}</td></tr>`;
+    }
+    html += '</table>';
+    el.innerHTML = html;
+    toast('Deletion event broadcast (id: ' + res.deletion_event_id.slice(0,12) + '\u2026)', true);
+  } catch (e) {
+    el.innerHTML = '';
+    toast('Delete failed: ' + e.message, false);
+  }
+}
+window.confirmDeleteListing = confirmDeleteListing;
 
 function fmtSats(s) { return (s/1000).toFixed(0)+'k'; }
 function fmtDate(d) { return d ? new Date(d).toLocaleString() : '\u2014'; }
