@@ -2,7 +2,7 @@
   "name": "pontmore-escrow-service",
   "version": "1.0.0",
   "description": "Pontmore PIP-01 conformant custodial escrow service over HTTPS with NIP-98 auth",
-  "main": "server.js",
+  "main": "src/main.js",
   "engines": {
     "node": ">=20.0.0"
   },

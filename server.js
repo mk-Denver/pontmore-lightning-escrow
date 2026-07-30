@@ -606,11 +606,12 @@ async function cleanupZombieEscrows() {
 // Startup
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function main() {
+async function init() {
   console.log('[startup] Environment validated ✓');
   console.log(`[startup] Service interface: ${config.SERVICE_INTERFACE}`);
   console.log(`[startup] Service endpoint: ${config.SERVICE_ENDPOINT}`);
   console.log(`[startup] Funding model:    ${config.FUNDING_MODEL}`);
+  console.log(`[startup] Accepted models:  ${config.ACCEPTED_FUNDING_MODELS.join(', ')}`);
   console.log(`[startup] Release decisions: ${config.ACCEPTED_RELEASE_DECISIONS.join(', ')}`);
   console.log(`[startup] Backend configured: ${hasBackend()}`);
 
@@ -629,16 +630,24 @@ async function main() {
   } else {
     console.log('[startup] Skipping backend init (credentials blank). Descriptor + schema are still served.');
   }
-
-  app.listen(config.PORT, () => {
-    console.log(`[startup] Express listening on port ${config.PORT}`);
-    console.log(`[startup] Descriptor:  ${config.SERVICE_ENDPOINT}/descriptor`);
-    console.log(`[startup] Schema URL:   ${config.SCHEMA_URL}`);
-    console.log('[startup] Service ready. ⚡');
-  });
 }
 
-main().catch((err) => {
-  console.error('[startup] FATAL:', err.message);
-  process.exit(1);
-});
+module.exports = app;
+
+if (require.main === module) {
+  init().then(() => {
+    app.listen(config.PORT, () => {
+      console.log(`[startup] Express listening on port ${config.PORT}`);
+      console.log(`[startup] Descriptor:  ${config.SERVICE_ENDPOINT}/descriptor`);
+      console.log(`[startup] Schema URL:   ${config.SCHEMA_URL}`);
+      console.log('[startup] Service ready. ⚡');
+    });
+  }).catch((err) => {
+    console.error('[startup] FATAL:', err.message);
+    process.exit(1);
+  });
+} else {
+  init().catch((err) => {
+    console.error('[startup] FATAL:', err.message);
+  });
+}
