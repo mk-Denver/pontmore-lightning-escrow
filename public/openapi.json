@@ -32,7 +32,10 @@
           "description": { "type": "string", "minLength": 1, "maxLength": 500 },
           "refund_ln_address": { "type": "string", "description": "Lightning Address for refund payout" },
           "idempotency_key": { "type": "string", "description": "Correlation value for request deduplication only; does not authorize participant joining" },
-          "invitation_token": { "type": "string", "description": "Service-issued invitation/enrollment token for participant joining. When present, this request enrolls the caller as the counterparty of an existing instance." }
+          "invitation_token": { "type": "string", "description": "Service-issued invitation/enrollment token for participant joining. When present, this request enrolls the caller as the counterparty of an existing instance." },
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"], "description": "Per-instance funding model. Must be one of the descriptor service.funding_model values. Omit to use the deployment default (service.default_funding_model)." },
+          "funding_threshold": { "type": "integer", "minimum": 1, "description": "n_of_m only: M (required funded participant count). Omit to use the deployment default." },
+          "participant_count": { "type": "integer", "minimum": 1, "description": "n_of_m only: N (total declared participants). Omit to use the deployment default." }
         },
         "required": ["amount_sats"]
       },
@@ -159,7 +162,7 @@
     "/create": {
       "post": {
         "summary": "create",
-        "description": "Open a new escrow instance and bind the creator's pubkey. The initial authenticated request establishes the instance. Any later participant join MUST use a service-issued invitation token plus the joining participant's authenticated request. Repeated calls with the same idempotency_key are idempotent and MUST NOT create a second instance.",
+        "description": "Open a new escrow instance and bind the creator's pubkey. The initial authenticated request establishes the instance. Any later participant join MUST use a service-issued invitation token plus the joining participant's authenticated request. The caller MAY specify a per-instance funding_model (one of the descriptor service.funding_model array); if omitted, the deployment default (service.default_funding_model) is used. Repeated calls with the same idempotency_key are idempotent and MUST NOT create a second instance.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateRequest" } } } },
         "responses": {
           "200": { "description": "Escrow instance created or existing instance returned (idempotent)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateResponse" } } } },

@@ -143,7 +143,8 @@ async function main() {
     descriptor.service.interface  = config.SERVICE_INTERFACE;
     descriptor.service.operations = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
     descriptor.service.auth       = ['nostr_http_auth'];
-    descriptor.service.funding_model = config.FUNDING_MODEL;
+    descriptor.service.funding_model = config.ACCEPTED_FUNDING_MODELS;
+    descriptor.service.default_funding_model = config.FUNDING_MODEL;
     descriptor.service.funding_threshold = config.FUNDING_THRESHOLD;
     descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;

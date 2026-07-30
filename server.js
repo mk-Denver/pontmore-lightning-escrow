@@ -85,7 +85,8 @@ app.get(path.join(config.SERVICE_PATH_PREFIX, 'descriptor'), (_req, res) => {
     descriptor.service.interface  = config.SERVICE_INTERFACE;
     descriptor.service.operations = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
     descriptor.service.auth       = ['nostr_http_auth'];
-    descriptor.service.funding_model     = config.FUNDING_MODEL;
+    descriptor.service.funding_model     = config.ACCEPTED_FUNDING_MODELS;
+    descriptor.service.default_funding_model = config.FUNDING_MODEL;
     descriptor.service.funding_threshold = config.FUNDING_THRESHOLD;
     descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
@@ -146,6 +147,9 @@ app.post(path.join(PREFIX, 'create'), requireBackend, requireNostrAuth, async (r
       refundLnAddress:  req.body.refund_ln_address,
       idempotencyKey:   req.body.idempotency_key,
       invitationToken:  req.body.invitation_token,
+      fundingModel:     req.body.funding_model,
+      fundingThreshold: req.body.funding_threshold,
+      participantCount: req.body.participant_count,
     });
     res.json(result);
   } catch (err) {
@@ -349,7 +353,8 @@ app.get(path.join(PREFIX, 'operator', 'descriptor'), (_req, res) => {
     descriptor.service.interface         = config.SERVICE_INTERFACE;
     descriptor.service.operations        = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
     descriptor.service.auth              = ['nostr_http_auth'];
-    descriptor.service.funding_model     = config.FUNDING_MODEL;
+    descriptor.service.funding_model     = config.ACCEPTED_FUNDING_MODELS;
+    descriptor.service.default_funding_model = config.FUNDING_MODEL;
     descriptor.service.funding_threshold = config.FUNDING_THRESHOLD;
     descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;

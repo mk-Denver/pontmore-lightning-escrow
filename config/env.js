@@ -119,15 +119,36 @@ if (!VALID_FUNDING_MODELS.has(FUNDING_MODEL)) {
   throw new Error(`[config/env] FUNDING_MODEL must be one of: ${[...VALID_FUNDING_MODELS].join(', ')}. Got: "${FUNDING_MODEL}"`);
 }
 
-// n_of_m requires FUNDING_THRESHOLD (M) and PARTICIPANT_COUNT (N) to be set.
+// Comma-separated list of funding models this deployment accepts on create.
+// Defaults to all three. FUNDING_MODEL becomes the default when create omits
+// an explicit funding_model.
+const ACCEPTED_FUNDING_MODELS = (process.env.ACCEPTED_FUNDING_MODELS || 'single_funder,two_party,n_of_m')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+for (const fm of ACCEPTED_FUNDING_MODELS) {
+  if (!VALID_FUNDING_MODELS.has(fm)) {
+    throw new Error(`[config/env] ACCEPTED_FUNDING_MODELS contains invalid value "${fm}". Valid: ${[...VALID_FUNDING_MODELS].join(', ')}`);
+  }
+}
+if (!ACCEPTED_FUNDING_MODELS.includes(FUNDING_MODEL)) {
+  throw new Error(`[config/env] FUNDING_MODEL ("${FUNDING_MODEL}") must be included in ACCEPTED_FUNDING_MODELS (${ACCEPTED_FUNDING_MODELS.join(', ')})`);
+}
+
+// n_of_m: threshold/count defaults are optional if n_of_m is merely accepted
+// (the create request can supply them per-instance). They ARE required when
+// n_of_m is the deployment default FUNDING_MODEL.
 // two_party always implies 2 participants / 2 required funders.
 if (FUNDING_MODEL === 'n_of_m') {
   if (!FUNDING_THRESHOLD || !PARTICIPANT_COUNT) {
-    throw new Error(`[config/env] n_of_m funding model requires FUNDING_THRESHOLD (M) and PARTICIPANT_COUNT (N) to be set`);
+    throw new Error(`[config/env] FUNDING_MODEL is n_of_m but FUNDING_THRESHOLD (M) and PARTICIPANT_COUNT (N) defaults are not set`);
   }
   if (FUNDING_THRESHOLD > PARTICIPANT_COUNT) {
     throw new Error(`[config/env] FUNDING_THRESHOLD (${FUNDING_THRESHOLD}) cannot exceed PARTICIPANT_COUNT (${PARTICIPANT_COUNT})`);
   }
+} else if (FUNDING_THRESHOLD && PARTICIPANT_COUNT && FUNDING_THRESHOLD > PARTICIPANT_COUNT) {
+  throw new Error(`[config/env] FUNDING_THRESHOLD (${FUNDING_THRESHOLD}) cannot exceed PARTICIPANT_COUNT (${PARTICIPANT_COUNT})`);
 }
 
 const ACCEPTED_RELEASE_DECISIONS = (process.env.ACCEPTED_RELEASE_DECISIONS || 'mutual_consent,operator_decision,application_signed_result')
@@ -166,6 +187,7 @@ const config = Object.freeze({
   FUNDING_MODEL,
   FUNDING_THRESHOLD,
   PARTICIPANT_COUNT,
+  ACCEPTED_FUNDING_MODELS,
   ACCEPTED_RELEASE_DECISIONS,
   APPLICATION_SIGNER_PUBKEYS,
   OPERATOR_PUBKEY,
