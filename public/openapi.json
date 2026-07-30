@@ -47,27 +47,36 @@
           "amount_sats": { "type": "integer" },
           "platform_fee_sats": { "type": "integer" },
           "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"] },
+          "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded participant count (n_of_m), or 2 for two_party" },
+          "participant_count": { "type": "integer", "nullable": true, "description": "Total declared participants (n_of_m)" },
           "invitation_token": { "type": "string", "description": "Token a counterparty must present to join this instance" }
         }
       },
       "FundingInstructionsResponse": {
         "type": "object",
-        "required": ["escrow_id", "payment_hash", "payment_request", "amount_sats"],
+        "required": ["escrow_id", "payment_hash", "payment_request", "amount_sats", "funding_model"],
         "properties": {
           "escrow_id": { "type": "string", "format": "uuid" },
+          "funder_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true, "description": "The funder this invoice belongs to (two_party / n_of_m)" },
           "payment_hash": { "type": "string" },
-          "payment_request": { "type": "string", "description": "BOLT11 invoice the funder must pay" },
-          "amount_sats": { "type": "integer", "description": "Total invoice amount including platform fee" }
+          "payment_request": { "type": "string", "description": "BOLT11 invoice the funder(s) must pay" },
+          "amount_sats": { "type": "integer", "description": "Total invoice amount including platform fee" },
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"] }
         }
       },
       "FundStatusResponse": {
         "type": "object",
-        "required": ["escrow_id", "state", "funded"],
+        "required": ["escrow_id", "state", "funded", "funding_model"],
         "properties": {
           "escrow_id": { "type": "string", "format": "uuid" },
           "state": { "type": "string", "enum": ["CREATED", "PENDING_FUNDING", "FUNDED", "DISPUTED", "SETTLED", "CANCELLED"] },
           "funded": { "type": "boolean" },
-          "invoice_status": { "type": "string", "nullable": true }
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"] },
+          "invoice_status": { "type": "string", "nullable": true },
+          "funded_count": { "type": "integer", "nullable": true, "description": "Number of funded participants (two_party / n_of_m)" },
+          "total_funders": { "type": "integer", "nullable": true, "description": "Total registered funders (two_party / n_of_m)" },
+          "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded count to reach FUNDED (two_party / n_of_m)" },
+          "my_funded": { "type": "boolean", "nullable": true, "description": "Whether the requesting funder's invoice is paid (two_party / n_of_m)" }
         }
       },
       "SignatureEntry": {
@@ -238,7 +247,7 @@
     "/refund": {
       "post": {
         "summary": "refund",
-        "description": "Request refund of the escrowed amount to the funder. Requires a verified release decision of action 'refund'. Refund recipient must be 'creator' (the funder in single_funder model).",
+        "description": "Request refund of the escrowed amount to the funder(s). Requires a verified release decision of action 'refund'. Refund recipient must be 'creator'. In single_funder the full amount refunds to the creator. In two_party / n_of_m each registered funder receives their contributed amount back to their refund_ln_address.",
         "requestBody": {
           "required": true,
           "content": {
@@ -306,15 +315,15 @@
   },
   "x-pontmore-funding-model": {
     "single_funder": {
-      "description": "One participant (creator) funds the escrow. Counterparty joins via invitation_token. Release recipient can be creator or counterparty.",
+      "description": "One participant (creator) funds the escrow. Counterparty joins via invitation_token. Release recipient can be creator or counterparty. A single BOLT11 invoice is stamped on the escrow instance.",
       "wire_fields": { "funding_threshold": "not used", "participant_count": "not used" }
     },
     "two_party": {
-      "description": "Two participants each fund a side of the same escrow instance.",
-      "wire_fields": { "funding_threshold": "not used", "participant_count": "2" }
+      "description": "Two participants each fund a side of the same escrow instance. Both creator and counterparty receive per-funder BOLT11 invoices tracked in escrow_funders. The instance transitions to FUNDED only when both funder invoices are paid. Refunds return each funder their contributed amount.",
+      "wire_fields": { "funding_threshold": "2 (implicit)", "participant_count": "2" }
     },
     "n_of_m": {
-      "description": "M of N required funders. Schema MUST expose funding_threshold (M) and participant_count (N).",
+      "description": "M of N required funders. The instance exposes funding_threshold (M) and participant_count (N). Participants join via invitation_token until participant_count is reached. Each funder receives a per-funder BOLT11 invoice. The instance transitions to FUNDED when at least funding_threshold funder invoices are paid. Refunds return each funded funder their contributed amount.",
       "wire_fields": { "funding_threshold": "M, minimum required funders", "participant_count": "N, total declared participants" }
     }
   },
