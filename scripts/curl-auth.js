@@ -84,10 +84,12 @@ function main() {
   const event       = buildSignedEvent(fullUrl, method.toUpperCase(), parsedBody || undefined);
   const authHeader  = 'Nostr ' + Buffer.from(JSON.stringify(event)).toString('base64');
 
-  const parts = ['curl -s', `-X ${method.toUpperCase()}`];
-  parts.push(`-H "Authorization: ${authHeader}"`);
-  if (parsedBody) parts.push(`-H "Content-Type: application/json"`, `-d '${parsedBody}'`);
-  parts.push(`"${fullUrl}"`);
+  function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+
+  const parts = ['curl -s', '-X', shq(method.toUpperCase())];
+  parts.push('-H', shq(`Authorization: ${authHeader}`));
+  if (parsedBody) parts.push('-H', shq('Content-Type: application/json'), '-d', shq(parsedBody));
+  parts.push(shq(fullUrl));
 
   console.log(parts.join(' \\\n  '));
   console.log('\n# Auth pubkey:', hx(schnorr.getPublicKey(decodeNsec(config.OPERATOR_NSEC))));

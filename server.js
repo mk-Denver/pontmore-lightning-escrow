@@ -26,6 +26,7 @@ const cron = require('node-cron');
 
 const { config, hasBackend } = require('./config/env');
 const { requireNostrAuth } = require('./lib/nostr-auth');
+const { decodeNsec } = require('./lib/nostr-keys');
 const escrow = require('./lib/escrow');
 const { StateConflictError, NotFoundError, ValidationError } = require('./services/supabase');
 
@@ -37,6 +38,12 @@ const {
   setPayoutSuccessful,
 } = require('./services/supabase');
 const { payToLightningAddress } = require('./services/blink');
+
+const { schnorr } = require('@noble/curves/secp256k1');
+const { sha256 } = require('@noble/hashes/sha256');
+const WebSocket = require('ws');
+
+const NOSTR_RELAYS = ['wss://nos.lol', 'wss://relay.damus.io'];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App setup
@@ -372,7 +379,6 @@ app.post(path.join(PREFIX, 'operator', 'publish'), requireBackend, requireNostrA
       return res.status(400).json({ error: 'body must contain a signed kind 30361 Nostr event as "event"' });
     }
 
-    const relays = ['wss://nos.lol', 'wss://relay.damus.io'];
     const results = [];
 
     // Broadcast via poc.pontmore.xyz API (HTTP proxy, faster)
@@ -380,7 +386,7 @@ app.post(path.join(PREFIX, 'operator', 'publish'), requireBackend, requireNostrA
       const pocRes = await fetch('https://poc.pontmore.xyz/api/escrows/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ relays, event }),
+        body: JSON.stringify({ relays: NOSTR_RELAYS, event }),
       });
       const pocJson = await pocRes.json();
       if (Array.isArray(pocJson.results)) results.push(...pocJson.results);
@@ -391,10 +397,9 @@ app.post(path.join(PREFIX, 'operator', 'publish'), requireBackend, requireNostrA
 
     // Fallback: direct WebSocket broadcast for any relays not covered above
     const covered = new Set(results.map((r) => r.relay));
-    for (const relay of relays) {
+    for (const relay of NOSTR_RELAYS) {
       if (covered.has(relay)) continue;
       try {
-        const WebSocket = require('ws');
         const ws = new WebSocket(relay);
         await new Promise((resolve) => {
           let result = null;
@@ -431,21 +436,10 @@ app.post(path.join(PREFIX, 'operator', 'unpublish'), requireBackend, requireNost
       return res.status(400).json({ error: 'body must contain a non-empty "event_ids" array of kind 30361 event ids to delete' });
     }
 
-    // Build and sign the kind 5 deletion event using the operator key.
-    const { config } = require('./config/env');
-    const { schnorr } = require('@noble/curves/secp256k1');
-    const { sha256 } = require('@noble/hashes/sha256');
-    const { bech32 } = require('@scure/base');
-
-    function decodeNsec(nsec) {
-      if (!nsec) throw new Error('OPERATOR_NSEC is not set in .env');
-      if (/^[0-9a-f]{64}$/i.test(nsec)) return nsec.toLowerCase();
-      if (nsec.startsWith('nsec1')) {
-        const decoded = bech32.decodeToBytes(nsec);
-        if (decoded.prefix !== 'nsec') throw new Error('Not a valid nsec');
-        return Buffer.from(decoded.bytes).toString('hex');
+    for (const id of event_ids) {
+      if (typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id)) {
+        return res.status(400).json({ error: `event_ids must be 32-byte hex (64 hex chars); got invalid value: "${id}"` });
       }
-      throw new Error('OPERATOR_NSEC must be nsec1... or 64-char hex');
     }
 
     if (!config.OPERATOR_NSEC) {
@@ -470,16 +464,19 @@ app.post(path.join(PREFIX, 'operator', 'unpublish'), requireBackend, requireNost
     delEvent.id  = Buffer.from(sha256(canonical)).toString('hex');
     delEvent.sig = Buffer.from(schnorr.sign(Buffer.from(delEvent.id, 'hex'), privkey)).toString('hex');
 
-    const relays = ['wss://nos.lol', 'wss://relay.damus.io'];
     const results = [];
 
     // Broadcast via poc.pontmore.xyz API
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
       const pocRes = await fetch('https://poc.pontmore.xyz/api/escrows/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ relays, event: delEvent }),
+        body: JSON.stringify({ relays: NOSTR_RELAYS, event: delEvent }),
+        signal: controller.signal,
       });
+      clearTimeout(timeout);
       const pocJson = await pocRes.json();
       if (Array.isArray(pocJson.results)) results.push(...pocJson.results);
       else results.push(...pocJson);
@@ -489,10 +486,9 @@ app.post(path.join(PREFIX, 'operator', 'unpublish'), requireBackend, requireNost
 
     // Fallback: direct WebSocket broadcast
     const covered = new Set(results.map((r) => r.relay));
-    for (const relay of relays) {
+    for (const relay of NOSTR_RELAYS) {
       if (covered.has(relay)) continue;
       try {
-        const WebSocket = require('ws');
         const ws = new WebSocket(relay);
         await new Promise((resolve) => {
           let result = null;

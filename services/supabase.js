@@ -193,9 +193,9 @@ async function joinEscrowInstance(escrowId, invitationToken, joinerPubkey, payou
     // For two_party, seed funder rows for both participants.
     if (model === 'two_party') {
       await seedFunderRow(db, escrowId, existing.creator_pubkey, 'creator',
-        existing.amount_sats, existing.platform_fee_sats, existing.refund_ln_address);
+        existing.amount_sats, existing.platform_fee_sats, existing.refund_ln_address, existing.payout_ln_address);
       await seedFunderRow(db, escrowId, joinerPubkey, 'counterparty',
-        existing.amount_sats, existing.platform_fee_sats, payoutLnAddress);
+        existing.amount_sats, existing.platform_fee_sats, null, payoutLnAddress ?? null);
     }
     return data;
   }
@@ -204,28 +204,29 @@ async function joinEscrowInstance(escrowId, invitationToken, joinerPubkey, payou
   // but all participants are tracked in escrow_funders.
   if (model === 'n_of_m') {
     const maxParticipants = existing.participant_count || 0;
+
+    // Seed creator funder row on first join if not yet present.
+    await seedFunderRow(db, escrowId, existing.creator_pubkey, 'creator',
+      existing.amount_sats, existing.platform_fee_sats, existing.refund_ln_address, existing.payout_ln_address);
+
+    // Refresh funder snapshot after seeding so the count is accurate.
     const { data: existingFunders } = await db
       .from('escrow_funders')
       .select('funder_pubkey')
       .eq('escrow_id', escrowId);
-    const currentCount = (existingFunders ?? []).length;
-
-    // Seed creator funder row on first join if not yet present.
-    if (currentCount === 0) {
-      await seedFunderRow(db, escrowId, existing.creator_pubkey, 'creator',
-        existing.amount_sats, existing.platform_fee_sats, existing.refund_ln_address);
-      currentCount + 1;
-    }
+    const funderList = existingFunders ?? [];
+    const currentCount = funderList.length;
 
     if (currentCount >= maxParticipants) {
       throw new ValidationError(`Escrow instance already has ${maxParticipants} participants.`);
     }
-    // Prevent duplicate joins
-    const alreadyJoined = (existingFunders ?? []).some(f => f.funder_pubkey === joinerPubkey);
-    if (alreadyJoined) throw new ValidationError('This pubkey has already joined this escrow instance.');
+    // Prevent duplicate joins (checked against fresh snapshot)
+    if (funderList.some(f => f.funder_pubkey === joinerPubkey)) {
+      throw new ValidationError('This pubkey has already joined this escrow instance.');
+    }
 
     await seedFunderRow(db, escrowId, joinerPubkey, 'counterparty',
-      existing.amount_sats, existing.platform_fee_sats, payoutLnAddress);
+      existing.amount_sats, existing.platform_fee_sats, null, payoutLnAddress ?? null);
 
     const newCount = currentCount + 1;
     const isFull = newCount >= maxParticipants;
@@ -251,20 +252,21 @@ async function joinEscrowInstance(escrowId, invitationToken, joinerPubkey, payou
   throw new ValidationError(`Unknown funding model: ${model}`);
 }
 
-async function seedFunderRow(db, escrowId, funderPubkey, role, amountSats, platformFeeSats, refundLnAddress) {
+async function seedFunderRow(db, escrowId, funderPubkey, role, amountSats, platformFeeSats, refundLnAddress, payoutLnAddress) {
   const { error } = await db
     .from('escrow_funders')
     .insert({
-      escrow_id:         escrowId,
-      funder_pubkey:     funderPubkey,
-      funder_role:       role,
-      amount_sats:       amountSats,
-      platform_fee_sats: platformFeeSats,
-      refund_ln_address: refundLnAddress ?? null,
+      escrow_id:           escrowId,
+      funder_pubkey:       funderPubkey,
+      funder_role:         role,
+      amount_sats:         amountSats,
+      platform_fee_sats:   platformFeeSats,
+      refund_ln_address:   refundLnAddress ?? null,
+      payout_ln_address:   payoutLnAddress ?? null,
     });
   if (error) {
-    // unique constraint violation = already seeded; safe to ignore
-    if (!error.message.includes('duplicate')) {
+    // unique-constraint violation (code 23505) = already seeded; safe to ignore
+    if (error.code !== '23505') {
       throw new Error(`[supabase] seedFunderRow failed: ${error.message}`);
     }
   }
@@ -337,7 +339,7 @@ async function setFunderFunded(escrowId, funderPubkey) {
     .eq('funder_pubkey', funderPubkey)
     .eq('funded', false)
     .select()
-    .single();
+    .maybeSingle();
   if (error) throw new Error(`[supabase] setFunderFunded failed: ${error.message}`);
   return data;
 }

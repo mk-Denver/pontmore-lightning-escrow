@@ -58,6 +58,7 @@ create table if not exists public.escrow_funders (
     funded                 boolean     not null default false,
     funded_at              timestamptz,
     refund_ln_address      text,
+    payout_ln_address      text,
     created_at             timestamptz not null default now(),
     updated_at             timestamptz not null default now(),
     unique (escrow_id, funder_pubkey)

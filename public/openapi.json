@@ -79,7 +79,8 @@
           "funded_count": { "type": "integer", "nullable": true, "description": "Number of funded participants (two_party / n_of_m)" },
           "total_funders": { "type": "integer", "nullable": true, "description": "Total registered funders (two_party / n_of_m)" },
           "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded count to reach FUNDED (two_party / n_of_m)" },
-          "my_funded": { "type": "boolean", "nullable": true, "description": "Whether the requesting funder's invoice is paid (two_party / n_of_m)" }
+          "my_funded": { "type": "boolean", "nullable": true, "description": "Whether the requesting funder's invoice is paid (two_party / n_of_m)" },
+          "funder_status": { "type": "string", "nullable": true, "description": "Per-funder invoice state for the requesting participant (two_party / n_of_m). Possible values: \"no_invoice\" (no invoice generated for this funder), \"expired\" (the funder's invoice has expired). Absent when the funder has a paid or pending invoice." }
         }
       },
       "SignatureEntry": {

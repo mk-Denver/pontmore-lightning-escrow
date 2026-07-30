@@ -18,7 +18,12 @@ module.exports = async ({ req, res, log, error }) => {
   if (host && !headers.host) headers.host = host;
   headers['x-forwarded-proto'] = scheme;
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      log('[adapter] request timed out after 25s');
+      resolve(res.text('Gateway Timeout', 504, { 'content-type': 'text/plain' }));
+    }, 25000);
+
     const mockReq = new Readable({ read() {} });
     Object.setPrototypeOf(mockReq, http.IncomingMessage.prototype);
     http.IncomingMessage.call(mockReq);
@@ -37,6 +42,12 @@ module.exports = async ({ req, res, log, error }) => {
     const mockRes = new http.ServerResponse(mockReq);
 
     let chunks = [];
+    let settled = false;
+
+    const done = (fn) => (...args) => {
+      if (!settled) { settled = true; clearTimeout(timeoutId); }
+      return fn(...args);
+    };
 
     const origWrite = mockRes.write.bind(mockRes);
     const origEnd = mockRes.end.bind(mockRes);
@@ -46,7 +57,7 @@ module.exports = async ({ req, res, log, error }) => {
       return origWrite(chunk);
     };
 
-    mockRes.end = function (chunk) {
+    mockRes.end = done(function (chunk) {
       if (chunk) chunks.push(Buffer.from(chunk));
       origEnd();
 
@@ -60,10 +71,16 @@ module.exports = async ({ req, res, log, error }) => {
       if (typeof parsed === 'object' && parsed !== null) {
         resolve(res.json(parsed, status, respHeaders));
       } else {
-        resolve(res.text(parsed, status, respHeaders));
+        resolve(res.text(body, status, respHeaders));
       }
-    };
+    });
 
-    app(mockReq, mockRes);
+    try {
+      app(mockReq, mockRes);
+    } catch (err) {
+      error('[adapter] route threw: ' + err.message);
+      if (!settled) { settled = true; clearTimeout(timeoutId); }
+      resolve(res.json({ error: 'internal server error' }, 500));
+    }
   });
 };

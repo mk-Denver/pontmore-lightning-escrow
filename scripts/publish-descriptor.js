@@ -33,16 +33,7 @@ function bx(hex) {
 }
 
 function decodeNsec(nsec) {
-  if (!nsec) throw new Error('OPERATOR_NSEC is not set in .env');
-  // Already hex (64 chars)
-  if (/^[0-9a-f]{64}$/i.test(nsec)) return nsec.toLowerCase();
-  // nsec format
-  if (nsec.startsWith('nsec1')) {
-    const decoded = bech32.decodeToBytes(nsec);
-    if (decoded.prefix !== 'nsec') throw new Error('Not a valid nsec');
-    return hx(decoded.bytes);
-  }
-  throw new Error('OPERATOR_NSEC must be nsec1... or 64-char hex');
+  return require('../lib/nostr-keys').decodeNsec(nsec);
 }
 
 function buildDescriptorEvent(descriptor, pubkeyHex, privkeyHex) {
