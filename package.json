@@ -10,7 +10,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "build": "echo No build step required",
-    "publish": "node scripts/publish-descriptor.js --publish"
+    "publish": "node scripts/publish-descriptor.js --publish",
+    "test:e2e": "node scripts/test-client.js"
   },
   "dependencies": {
     "@noble/curves": "^1.6.0",

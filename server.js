@@ -24,7 +24,7 @@ const path = require('path');
 const express = require('express');
 const cron = require('node-cron');
 
-const { config, hasBackend } = require('./config/env');
+const { config, hasBackend, isMockMode } = require('./config/env');
 const { requireNostrAuth } = require('./lib/nostr-auth');
 const { decodeNsec } = require('./lib/nostr-keys');
 const escrow = require('./lib/escrow');
@@ -36,8 +36,9 @@ const {
   fileDispute,
   resolveDispute,
   setPayoutSuccessful,
+  listFunders,
 } = require('./services/supabase');
-const { payToLightningAddress } = require('./services/blink');
+const blink = require('./services/blink');
 
 const { schnorr } = require('@noble/curves/secp256k1');
 const { sha256 } = require('@noble/hashes/sha256');
@@ -307,7 +308,7 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
       const addr = escrow.payout_ln_address;
       if (addr && addr.includes('@')) {
         try {
-          await payToLightningAddress({ lnAddress: addr, amountSats: payoutSats });
+          await blink.payToLightningAddress({ lnAddress: addr, amountSats: payoutSats });
           await setPayoutSuccessful(escrowId);
         } catch (err) {
           return res.json({
@@ -323,7 +324,7 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
       const addr = escrow.refund_ln_address;
       if (addr && addr.includes('@')) {
         try {
-          await payToLightningAddress({ lnAddress: addr, amountSats: payoutSats });
+          await blink.payToLightningAddress({ lnAddress: addr, amountSats: payoutSats });
           await setPayoutSuccessful(escrowId);
         } catch (err) {
           return res.json({
@@ -518,6 +519,69 @@ app.post(path.join(PREFIX, 'operator', 'unpublish'), requireBackend, requireNost
     handleError(res, err);
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test-only endpoints (available ONLY when BLINK_MODE=mock)
+//
+// These simulate Lightning invoice payments and payouts so the full escrow flow
+// can be exercised end-to-end without real sats. They are never registered in
+// real (production) mode. Still require NIP-98 auth so they are not anonymous.
+// ─────────────────────────────────────────────────────────────────────────────
+
+if (isMockMode()) {
+  app.post(path.join(PREFIX, 'test', 'pay-invoice'), requireBackend, requireNostrAuth, async (req, res) => {
+    try {
+      const { payment_hash } = req.body;
+      if (!payment_hash || !/^[0-9a-f]{64}$/i.test(payment_hash)) {
+        return res.status(400).json({ error: 'payment_hash must be a 64-char hex string' });
+      }
+      if (typeof blink.markInvoicePaid !== 'function') {
+        return res.status(503).json({ error: 'test endpoints require BLINK_MODE=mock' });
+      }
+      const ok = blink.markInvoicePaid(payment_hash);
+      if (!ok) return res.status(404).json({ error: 'no mock invoice found for that payment_hash' });
+      res.json({ payment_hash, status: 'PAID' });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.post(path.join(PREFIX, 'test', 'pay-escrow'), requireBackend, requireNostrAuth, async (req, res) => {
+    try {
+      const { escrow_id } = req.body;
+      if (!escrow_id) return res.status(400).json({ error: 'escrow_id is required' });
+      if (typeof blink.markInvoicePaid !== 'function') {
+        return res.status(503).json({ error: 'test endpoints require BLINK_MODE=mock' });
+      }
+
+      const inst = await getEscrowInstance(escrow_id);
+      const paid = [];
+      if (inst.blink_payment_hash) {
+        blink.markInvoicePaid(inst.blink_payment_hash);
+        paid.push(inst.blink_payment_hash);
+      }
+      const funders = await listFunders(escrow_id);
+      for (const f of funders) {
+        if (f.blink_payment_hash && !paid.includes(f.blink_payment_hash)) {
+          blink.markInvoicePaid(f.blink_payment_hash);
+          paid.push(f.blink_payment_hash);
+        }
+      }
+      res.json({ escrow_id, paid_invoices: paid, count: paid.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get(path.join(PREFIX, 'test', 'mock-invoices'), requireBackend, requireNostrAuth, async (_req, res) => {
+    if (typeof blink.listInvoices !== 'function') {
+      return res.status(503).json({ error: 'test endpoints require BLINK_MODE=mock' });
+    }
+    res.json({ invoices: blink.listInvoices() });
+  });
+
+  console.warn('[startup] TEST ENDPOINTS ENABLED (BLINK_MODE=mock). Do NOT use in production.');
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error handling

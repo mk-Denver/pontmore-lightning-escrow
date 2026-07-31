@@ -109,6 +109,14 @@ const PARTICIPANT_COUNT     = (function () {
 const FIAT_CURRENCY         = optionalString('FIAT_CURRENCY', 'KES');
 const NIP98_MAX_AGE_SECONDS = Number(process.env.NIP98_MAX_AGE_SECONDS) || 60;
 
+// Blink backend mode: 'real' (default) hits the Blink GraphQL API; 'mock' uses
+// an in-memory fake backend so the full escrow flow can be exercised without
+// real Lightning sats. Mock mode also enables the /test/* endpoints.
+const BLINK_MODE = optionalString('BLINK_MODE', 'real').toLowerCase();
+if (BLINK_MODE !== 'real' && BLINK_MODE !== 'mock') {
+  throw new Error(`[config/env] BLINK_MODE must be 'real' or 'mock'. Got: "${BLINK_MODE}"`);
+}
+
 const VALID_FUNDING_MODELS = new Set(['single_funder', 'two_party', 'n_of_m']);
 const VALID_RELEASE_DECISIONS = new Set([
   'mutual_consent', 'operator_decision', 'oracle_signature',
@@ -198,6 +206,7 @@ const config = Object.freeze({
   // Backend (may be blank until deployment)
   SUPABASE_PROJECT_URL:      optionalStringOrBlank('SUPABASE_PROJECT_URL'),
   SUPABASE_SERVICE_ROLE_KEY: optionalStringOrBlank('SUPABASE_SERVICE_ROLE_KEY'),
+  BLINK_MODE:                BLINK_MODE,
   BLINK_GRAPHQL_ENDPOINT:    optionalUrl('BLINK_GRAPHQL_ENDPOINT', 'https://graphql.blink.sv/graphql'),
   BLINK_API_KEY:             optionalStringOrBlank('BLINK_API_KEY'),
 
@@ -229,9 +238,18 @@ function splitPlatformFee(totalFeeSats) {
 /**
  * Whether the backend custody/database dependencies are configured.
  * The service refuses to start operation routes when false.
+ *
+ * In mock mode the Blink API key is not required (an in-memory fake backend is
+ * used); only Supabase (persistence) must be configured to exercise the flow.
  */
 function hasBackend() {
-  return Boolean(config.SUPABASE_PROJECT_URL && config.SUPABASE_SERVICE_ROLE_KEY && config.BLINK_API_KEY);
+  const hasDb = Boolean(config.SUPABASE_PROJECT_URL && config.SUPABASE_SERVICE_ROLE_KEY);
+  if (config.BLINK_MODE === 'mock') return hasDb;
+  return Boolean(hasDb && config.BLINK_API_KEY);
 }
 
-module.exports = { config, calculatePlatformFee, splitPlatformFee, hasBackend };
+function isMockMode() {
+  return config.BLINK_MODE === 'mock';
+}
+
+module.exports = { config, calculatePlatformFee, splitPlatformFee, hasBackend, isMockMode };
