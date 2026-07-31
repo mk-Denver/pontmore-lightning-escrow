@@ -51,6 +51,10 @@ const NOSTR_RELAYS = ['wss://nos.lol', 'wss://relay.damus.io'];
 
 const app = express();
 
+// Honor X-Forwarded-Proto / X-Forwarded-Host from the hosting proxy (e.g. Render)
+// so req.protocol and req.get('host') match the URL the client signed in NIP-98.
+app.set('trust proxy', 1);
+
 // Capture the raw request body (for NIP-98 payload hash verification) before JSON parse.
 app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; },
