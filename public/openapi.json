@@ -34,8 +34,8 @@
           "idempotency_key": { "type": "string", "description": "Correlation value for request deduplication only; does not authorize participant joining" },
           "invitation_token": { "type": "string", "description": "Service-issued invitation/enrollment token for participant joining. When present, this request enrolls the caller as the counterparty of an existing instance." },
           "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"], "description": "Per-instance funding model. Must be one of the descriptor service.funding_model values. Omit to use the deployment default (service.default_funding_model)." },
-          "funding_threshold": { "type": "integer", "minimum": 1, "description": "n_of_m only: M (required funded participant count). Omit to use the deployment default." },
-          "participant_count": { "type": "integer", "minimum": 1, "description": "n_of_m only: N (total declared participants). Omit to use the deployment default." }
+          "funding_threshold": { "type": "integer", "minimum": 1, "description": "n_of_m only: M (required funded participant count). Required on every n_of_m create request — there is no deployment default." },
+          "participant_count": { "type": "integer", "minimum": 1, "description": "n_of_m only: N (total declared participants). Required on every n_of_m create request — there is no deployment default." }
         },
         "required": ["amount_sats"]
       },

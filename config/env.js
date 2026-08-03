@@ -144,18 +144,11 @@ if (!ACCEPTED_FUNDING_MODELS.includes(FUNDING_MODEL)) {
   throw new Error(`[config/env] FUNDING_MODEL ("${FUNDING_MODEL}") must be included in ACCEPTED_FUNDING_MODELS (${ACCEPTED_FUNDING_MODELS.join(', ')})`);
 }
 
-// n_of_m: threshold/count defaults are optional if n_of_m is merely accepted
-// (the create request can supply them per-instance). They ARE required when
-// n_of_m is the deployment default FUNDING_MODEL.
+// n_of_m threshold/count are always client-defined on each create request (see
+// lib/escrow.js). FUNDING_THRESHOLD / PARTICIPANT_COUNT are NOT used as defaults
+// — they remain optional and are only advertised in the descriptor when set.
 // two_party always implies 2 participants / 2 required funders.
-if (FUNDING_MODEL === 'n_of_m') {
-  if (!FUNDING_THRESHOLD || !PARTICIPANT_COUNT) {
-    throw new Error(`[config/env] FUNDING_MODEL is n_of_m but FUNDING_THRESHOLD (M) and PARTICIPANT_COUNT (N) defaults are not set`);
-  }
-  if (FUNDING_THRESHOLD > PARTICIPANT_COUNT) {
-    throw new Error(`[config/env] FUNDING_THRESHOLD (${FUNDING_THRESHOLD}) cannot exceed PARTICIPANT_COUNT (${PARTICIPANT_COUNT})`);
-  }
-} else if (FUNDING_THRESHOLD && PARTICIPANT_COUNT && FUNDING_THRESHOLD > PARTICIPANT_COUNT) {
+if (FUNDING_THRESHOLD && PARTICIPANT_COUNT && FUNDING_THRESHOLD > PARTICIPANT_COUNT) {
   throw new Error(`[config/env] FUNDING_THRESHOLD (${FUNDING_THRESHOLD}) cannot exceed PARTICIPANT_COUNT (${PARTICIPANT_COUNT})`);
 }
 
