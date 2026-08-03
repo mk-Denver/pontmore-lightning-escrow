@@ -56,6 +56,16 @@ const app = express();
 // so req.protocol and req.get('host') match the URL the client signed in NIP-98.
 app.set('trust proxy', 1);
 
+// CORS: allow browser-based clients (e.g. the test UI) to call the API cross-origin.
+// NIP-98 auth is the real security layer; CORS only governs browser reachability.
+app.use((req, res, next) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
 // Capture the raw request body (for NIP-98 payload hash verification) before JSON parse.
 app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf; },
