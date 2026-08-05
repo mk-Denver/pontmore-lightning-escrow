@@ -32,27 +32,47 @@
           "description": { "type": "string", "minLength": 1, "maxLength": 500 },
           "refund_ln_address": { "type": "string", "description": "Lightning Address for refund payout" },
           "idempotency_key": { "type": "string", "description": "Correlation value for request deduplication only; does not authorize participant joining" },
-          "invitation_token": { "type": "string", "description": "Service-issued invitation/enrollment token for participant joining. When present, this request enrolls the caller as the counterparty of an existing instance." },
-          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"], "description": "Per-instance funding model. Must be one of the descriptor service.funding_model values. Omit to use the deployment default (service.default_funding_model)." },
-          "funding_threshold": { "type": "integer", "minimum": 1, "description": "n_of_m only: M (required funded participant count). Required on every n_of_m create request — there is no deployment default." },
-          "participant_count": { "type": "integer", "minimum": 1, "description": "n_of_m only: N (total declared participants). Required on every n_of_m create request — there is no deployment default." }
+          "enrollment_token": { "type": "string", "description": "Single-use, signer-bound token for joining an existing escrow. Join requests require only this field." },
+          "participant_pubkeys": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "minItems": 1, "uniqueItems": true, "description": "Exact participant pubkeys authorized to enroll. One entry for single_funder/two_party; N-1 entries for m_of_n." },
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "m_of_n"], "description": "Per-instance funding model. Must be one of the descriptor service.funding_model values. Omit to use the deployment default." },
+          "funding_threshold": { "type": "integer", "minimum": 1, "description": "m_of_n only: M, the required funded participant count." },
+          "participant_count": { "type": "integer", "minimum": 2, "description": "m_of_n only: N, the total declared participant count." }
         },
-        "required": ["amount_sats"]
+        "oneOf": [
+          { "required": ["enrollment_token"] },
+          { "required": ["amount_sats", "participant_pubkeys"] }
+        ]
       },
       "CreateResponse": {
         "type": "object",
-        "required": ["escrow_id", "state", "creator_pubkey", "amount_sats", "funding_model", "invitation_token"],
+        "required": ["escrow_id", "state", "creator_pubkey", "amount_sats", "funding_model", "enrollments", "funding_deadline"],
         "properties": {
           "escrow_id": { "type": "string", "format": "uuid" },
-          "state": { "type": "string", "enum": ["CREATED", "PENDING_FUNDING"] },
+          "state": { "type": "string", "enum": ["created"] },
           "creator_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "counterparty_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true },
           "amount_sats": { "type": "integer" },
           "platform_fee_sats": { "type": "integer" },
-          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"] },
-          "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded participant count (n_of_m), or 2 for two_party" },
-          "participant_count": { "type": "integer", "nullable": true, "description": "Total declared participants (n_of_m)" },
-          "invitation_token": { "type": "string", "description": "Token a counterparty must present to join this instance" }
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "m_of_n"] },
+          "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded participant count (m_of_n), or 2 for two_party" },
+          "participant_count": { "type": "integer", "nullable": true, "description": "Total declared participants (m_of_n)" },
+          "funding_deadline": { "type": "string", "format": "date-time" },
+          "enrollments": { "type": "array", "items": { "type": "object", "required": ["participant_pubkey", "enrollment_token"], "properties": { "participant_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "enrollment_token": { "type": "string" } } } }
+        }
+      },
+      "JoinResponse": {
+        "type": "object",
+        "required": ["escrow_id", "state", "creator_pubkey", "counterparty_pubkey", "amount_sats", "funding_model"],
+        "properties": {
+          "escrow_id": { "type": "string", "format": "uuid" },
+          "state": { "type": "string", "enum": ["created", "partially_funded", "active"] },
+          "creator_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "counterparty_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "amount_sats": { "type": "integer" },
+          "platform_fee_sats": { "type": "integer" },
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "m_of_n"] },
+          "funding_threshold": { "type": "integer", "nullable": true },
+          "participant_count": { "type": "integer", "nullable": true }
         }
       },
       "FundingInstructionsResponse": {
@@ -60,11 +80,11 @@
         "required": ["escrow_id", "payment_hash", "payment_request", "amount_sats", "funding_model"],
         "properties": {
           "escrow_id": { "type": "string", "format": "uuid" },
-          "funder_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true, "description": "The funder this invoice belongs to (two_party / n_of_m)" },
+          "funder_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true, "description": "The funder this invoice belongs to (two_party / m_of_n)" },
           "payment_hash": { "type": "string" },
           "payment_request": { "type": "string", "description": "BOLT11 invoice the funder(s) must pay" },
           "amount_sats": { "type": "integer", "description": "Total invoice amount including platform fee" },
-          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"] }
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "m_of_n"] }
         }
       },
       "FundStatusResponse": {
@@ -72,15 +92,15 @@
         "required": ["escrow_id", "state", "funded", "funding_model"],
         "properties": {
           "escrow_id": { "type": "string", "format": "uuid" },
-          "state": { "type": "string", "enum": ["CREATED", "PENDING_FUNDING", "FUNDED", "DISPUTED", "SETTLED", "CANCELLED"] },
+          "state": { "type": "string", "enum": ["created", "partially_funded", "active", "release_pending", "disputed", "released", "refunded", "canceled"] },
           "funded": { "type": "boolean" },
-          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "n_of_m"] },
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "m_of_n"] },
           "invoice_status": { "type": "string", "nullable": true },
-          "funded_count": { "type": "integer", "nullable": true, "description": "Number of funded participants (two_party / n_of_m)" },
-          "total_funders": { "type": "integer", "nullable": true, "description": "Total registered funders (two_party / n_of_m)" },
-          "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded count to reach FUNDED (two_party / n_of_m)" },
-          "my_funded": { "type": "boolean", "nullable": true, "description": "Whether the requesting funder's invoice is paid (two_party / n_of_m)" },
-          "funder_status": { "type": "string", "nullable": true, "description": "Per-funder invoice state for the requesting participant (two_party / n_of_m). Possible values: \"no_invoice\" (no invoice generated for this funder), \"expired\" (the funder's invoice has expired). Absent when the funder has a paid or pending invoice." }
+          "funded_count": { "type": "integer", "nullable": true, "description": "Number of funded participants (two_party / m_of_n)" },
+          "total_funders": { "type": "integer", "nullable": true, "description": "Total registered funders (two_party / m_of_n)" },
+          "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded count to reach active (two_party / m_of_n)" },
+          "my_funded": { "type": "boolean", "nullable": true, "description": "Whether the requesting funder's invoice is paid (two_party / m_of_n)" },
+          "funder_status": { "type": "string", "nullable": true, "description": "Per-funder invoice state for the requesting participant (two_party / m_of_n). Possible values: no_invoice or expired." }
         }
       },
       "SignatureEntry": {
@@ -113,7 +133,7 @@
         "required": ["escrow_id", "state", "recipient", "payout_sats", "payout"],
         "properties": {
           "escrow_id": { "type": "string", "format": "uuid" },
-          "state": { "type": "string", "enum": ["SETTLED"] },
+          "state": { "type": "string", "enum": ["released"] },
           "recipient": { "type": "string", "enum": ["creator", "counterparty"] },
           "payout_sats": { "type": "integer" },
           "payout": { "type": "object" }
@@ -124,7 +144,7 @@
         "required": ["escrow_id", "state", "recipient", "refund_sats", "payout"],
         "properties": {
           "escrow_id": { "type": "string", "format": "uuid" },
-          "state": { "type": "string", "enum": ["CANCELLED"] },
+          "state": { "type": "string", "enum": ["refunded"] },
           "recipient": { "type": "string", "enum": ["creator"] },
           "refund_sats": { "type": "integer" },
           "payout": { "type": "object" }
@@ -135,7 +155,8 @@
         "required": ["escrow_id", "state"],
         "properties": {
           "escrow_id": { "type": "string", "format": "uuid" },
-          "state": { "type": "string", "enum": ["CANCELLED"] }
+          "state": { "type": "string", "enum": ["canceled"] },
+          "refunds": { "type": "array", "items": { "type": "object" }, "description": "Refund results for participant sides funded before cancellation" }
         }
       },
       "CanonicalMessage": {
@@ -163,10 +184,10 @@
     "/create": {
       "post": {
         "summary": "create",
-        "description": "Open a new escrow instance and bind the creator's pubkey. The initial authenticated request establishes the instance. Any later participant join MUST use a service-issued invitation token plus the joining participant's authenticated request. The caller MAY specify a per-instance funding_model (one of the descriptor service.funding_model array); if omitted, the deployment default (service.default_funding_model) is used. Repeated calls with the same idempotency_key are idempotent and MUST NOT create a second instance.",
+        "description": "Open an escrow and bind the creator plus explicit participant_pubkeys. The response issues one signer-bound, single-use enrollment token per later participant. A join request supplies enrollment_token and must be signed by its bound participant. Idempotency is scoped to the authenticated creator and never authorizes enrollment.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateRequest" } } } },
         "responses": {
-          "200": { "description": "Escrow instance created or existing instance returned (idempotent)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateResponse" } } } },
+          "200": { "description": "Escrow instance created, or a participant enrolled", "content": { "application/json": { "schema": { "oneOf": [{ "$ref": "#/components/schemas/CreateResponse" }, { "$ref": "#/components/schemas/JoinResponse" }] } } } },
           "400": { "description": "Validation error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
           "401": { "$ref": "#/components/responses/Unauthorized" }
         }
@@ -200,7 +221,7 @@
     "/fund_status": {
       "post": {
         "summary": "fund_status",
-        "description": "Observe the funding state of a participant's side. Transitions PENDING_FUNDING→FUNDED when the invoice is paid, or PENDING_FUNDING→CANCELLED when expired.",
+        "description": "Observe funding and synchronize all issued participant invoices. Funding confirmation moves created to partially_funded, then active once the declared condition is satisfied. Read access remains valid in terminal states.",
         "requestBody": {
           "required": true,
           "content": {
@@ -251,7 +272,7 @@
     "/refund": {
       "post": {
         "summary": "refund",
-        "description": "Request refund of the escrowed amount to the funder(s). Requires a verified release decision of action 'refund'. Refund recipient must be 'creator'. In single_funder the full amount refunds to the creator. In two_party / n_of_m each registered funder receives their contributed amount back to their refund_ln_address.",
+        "description": "Request refund of the escrowed amount to the funder(s). Requires a verified release decision of action 'refund'. In single_funder the full amount refunds to the creator. In two_party / m_of_n each funded participant receives its contribution.",
         "requestBody": {
           "required": true,
           "content": {
@@ -279,7 +300,7 @@
     "/cancel": {
       "post": {
         "summary": "cancel",
-        "description": "Request cancellation of an unfunded or unresolved escrow instance. Cannot cancel a funded escrow; use refund with a valid decision instead.",
+        "description": "Cancel a created instance, or cancel a partially_funded instance after funding_deadline. Every funded participant side is refunded before the terminal canceled transition. Active instances require refund with a valid decision.",
         "requestBody": {
           "required": true,
           "content": {
@@ -304,14 +325,16 @@
   },
   "x-pontmore-state-machine": {
     "transitions": {
-      "CREATED": ["PENDING_FUNDING", "CANCELLED"],
-      "PENDING_FUNDING": ["PENDING_FUNDING", "FUNDED", "CANCELLED"],
-      "FUNDED": ["SETTLED", "DISPUTED", "CANCELLED"],
-      "DISPUTED": ["SETTLED", "CANCELLED"],
-      "SETTLED": [],
-      "CANCELLED": []
+      "created": ["created", "partially_funded", "active", "canceled"],
+      "partially_funded": ["partially_funded", "active", "canceled"],
+      "active": ["release_pending", "released", "refunded", "disputed"],
+      "release_pending": ["released", "refunded", "canceled", "disputed"],
+      "disputed": ["released", "refunded"],
+      "released": [],
+      "refunded": [],
+      "canceled": []
     },
-    "terminal_states": ["SETTLED", "CANCELLED"]
+    "terminal_states": ["released", "refunded", "canceled"]
   },
   "x-pontmore-idempotency": {
     "description": "The idempotency_key in create is a correlation value used to deduplicate retries. It MUST NOT authorize participant joining or bind any additional pubkeys. Repeated create calls with the same idempotency_key return the existing instance and do not create a second one.",
@@ -319,15 +342,15 @@
   },
   "x-pontmore-funding-model": {
     "single_funder": {
-      "description": "One participant (creator) funds the escrow. Counterparty joins via invitation_token. Release recipient can be creator or counterparty. A single BOLT11 invoice is stamped on the escrow instance.",
+      "description": "One participant (creator) funds the escrow. The declared counterparty joins with its signer-bound enrollment_token.",
       "wire_fields": { "funding_threshold": "not used", "participant_count": "not used" }
     },
     "two_party": {
-      "description": "Two participants each fund a side of the same escrow instance. Both creator and counterparty receive per-funder BOLT11 invoices tracked in escrow_funders. The instance transitions to FUNDED only when both funder invoices are paid. Refunds return each funder their contributed amount.",
+      "description": "Two declared participants each fund a side. The instance becomes active only when both invoices are paid.",
       "wire_fields": { "funding_threshold": "2 (implicit)", "participant_count": "2" }
     },
-    "n_of_m": {
-      "description": "M of N required funders. The instance exposes funding_threshold (M) and participant_count (N). Participants join via invitation_token until participant_count is reached. Each funder receives a per-funder BOLT11 invoice. The instance transitions to FUNDED when at least funding_threshold funder invoices are paid. Refunds return each funded funder their contributed amount.",
+    "m_of_n": {
+      "description": "M of N declared participants must fund. The instance exposes funding_threshold (M) and participant_count (N). Every later participant receives a distinct signer-bound enrollment token. The instance becomes active at the threshold.",
       "wire_fields": { "funding_threshold": "M, minimum required funders", "participant_count": "N, total declared participants" }
     }
   },
@@ -342,6 +365,10 @@
       "application_signed_result": "Release or refund authorized by a signed result from the originating application. Signed payload MUST include escrow identifier and result identifier/hash; signatures are BIP-340 Schnorr.",
       "threshold_participant_signatures": "Release or refund authorized by a threshold of participant signatures. Schema MUST define the threshold value and the location of the participant signatures."
     }
+  },
+  "x-pontmore-timeouts": {
+    "funding_timeout": { "source": "funding_deadline", "fallback_resolution": "cancel_and_refund_funded_sides" },
+    "refund_trigger_timeout": { "fallback_resolution": "operator_decision" }
   },
   "x-pontmore-schema-fetch": {
     "https_only": true,

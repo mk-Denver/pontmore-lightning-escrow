@@ -3,11 +3,14 @@
   "escrow_type": "custodial_escrow",
   "networks": ["lightning"],
   "funding_rules": {
-    "required_confirmation": "invoice_paid"
+    "required_confirmation": "invoice_paid",
+    "funding_timeout": "24_hours",
+    "funding_timeout_resolution": "cancel_and_refund_funded_sides"
   },
   "release_rules": {
     "release_trigger": "application_signed_result",
-    "refund_trigger": "timeout_requires_mutual_consent"
+    "refund_trigger": "timeout_or_dispute_refund_decision",
+    "timeout_fallback": "operator_decision"
   },
   "dispute_rules": {
     "policy": "operator_resolved"
@@ -29,10 +32,10 @@
     "transport": ["https"],
     "interface": "pontmore_escrow_http_v1",
     "endpoint": "https://escrow.example.com/pontmore/v1",
-    "schema_url": "https://escrow.example.com/pontmore/v1/openapi.json",
+    "schema_url": "https://escrow.example.com/pontmore/v1/openapi/v1.0.0.json",
     "auth": ["nostr_http_auth"],
     "operations": ["create", "funding_instructions", "fund_status", "release", "refund", "cancel"],
-    "funding_model": ["single_funder", "two_party", "n_of_m"],
+    "funding_model": ["single_funder", "two_party", "m_of_n"],
     "funding_threshold": null,
     "participant_count": null,
     "release_decisions": ["mutual_consent", "operator_decision", "application_signed_result"]

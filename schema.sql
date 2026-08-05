@@ -11,10 +11,11 @@
 
 create table if not exists public.escrow_instances (
     escrow_id                  uuid        primary key default gen_random_uuid(),
-    state                      text        not null default 'CREATED',
+    state                      text        not null default 'created',
     funding_model              text        not null default 'single_funder',
     funding_threshold          integer     check (funding_threshold is null or funding_threshold >= 1),
     participant_count          integer     check (participant_count is null or participant_count >= 1),
+    funding_deadline           timestamptz not null default (now() + interval '24 hours'),
     creator_pubkey             text        not null,
     counterparty_pubkey        text,
     amount_sats                integer     not null check (amount_sats > 0),
@@ -23,7 +24,9 @@ create table if not exists public.escrow_instances (
     refund_ln_address          text,
     payout_ln_address          text,
     idempotency_key            text        unique,
-    invitation_token           text        not null unique,
+    invitation_token           text        unique,
+    invitation_pubkey          text,
+    invitation_redeemed_at     timestamptz,
     blink_payment_hash         text,
     blink_payment_request      text,
     release_decision_type      text,
@@ -41,8 +44,62 @@ create table if not exists public.escrow_instances (
     updated_at                 timestamptz not null default now()
 );
 
+alter table public.escrow_instances add column if not exists funding_deadline timestamptz;
+alter table public.escrow_instances add column if not exists invitation_pubkey text;
+alter table public.escrow_instances add column if not exists invitation_redeemed_at timestamptz;
+alter table public.escrow_instances alter column invitation_token drop not null;
+
+alter table public.escrow_instances drop constraint if exists escrow_instances_idempotency_key_key;
+create unique index if not exists idx_escrow_creator_idempotency
+    on public.escrow_instances (creator_pubkey, idempotency_key)
+    where idempotency_key is not null;
+
+alter table public.escrow_instances alter column state set default 'created';
+update public.escrow_instances set state = case state
+    when 'CREATED' then 'created'
+    when 'PENDING_FUNDING' then 'created'
+    when 'FUNDED' then 'active'
+    when 'DISPUTED' then 'disputed'
+    when 'SETTLED' then 'released'
+    when 'CANCELLED' then 'canceled'
+    else state
+end;
+update public.escrow_instances set funding_model = 'm_of_n' where funding_model = 'n_of_m';
+update public.escrow_instances
+set funding_deadline = coalesce(funding_deadline, created_at + interval '24 hours');
+alter table public.escrow_instances alter column funding_deadline set not null;
+
+create table if not exists public.escrow_enrollments (
+    enrollment_id          uuid        primary key default gen_random_uuid(),
+    escrow_id              uuid        not null references public.escrow_instances(escrow_id) on delete cascade,
+    token_hash             text        not null unique,
+    enrollment_token       text        not null,
+    participant_pubkey     text        not null,
+    redeemed_at            timestamptz,
+    created_at             timestamptz not null default now(),
+    unique (escrow_id, participant_pubkey)
+);
+alter table public.escrow_enrollments add column if not exists enrollment_token text;
+
+create table if not exists public.escrow_decision_nonces (
+    escrow_id              uuid        not null references public.escrow_instances(escrow_id) on delete cascade,
+    nonce                  text        not null,
+    created_at             timestamptz not null default now(),
+    primary key (escrow_id, nonce)
+);
+
+create or replace function public.set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+    new.updated_at := now();
+    return new;
+end;
+$$;
+
 -- ============================================================================
--- escrow_funders: per-funder contributions for two_party and n_of_m models.
+-- escrow_funders: per-funder contributions for two_party and m_of_n models.
 -- In single_funder the single invoice stays on escrow_instances.
 -- Each funder row tracks an individual BOLT11 invoice and payment status.
 -- ============================================================================
@@ -97,19 +154,27 @@ create or replace function public.transition_escrow_state(
 ) returns setof public.escrow_instances
 language plpgsql
 security definer
+set search_path = public, pg_temp
 as $$
 declare
     allowed_transitions text[][] := array[
-        array['CREATED',          'PENDING_FUNDING'],
-        array['CREATED',          'CANCELLED'],
-        array['PENDING_FUNDING',  'PENDING_FUNDING'],   -- self-transition for invoice stamping
-        array['PENDING_FUNDING',  'FUNDED'],
-        array['PENDING_FUNDING',  'CANCELLED'],
-        array['FUNDED',           'SETTLED'],
-        array['FUNDED',           'DISPUTED'],
-        array['FUNDED',           'CANCELLED'],
-        array['DISPUTED',         'SETTLED'],
-        array['DISPUTED',         'CANCELLED']
+        array['created',          'created'],
+        array['created',          'partially_funded'],
+        array['created',          'active'],
+        array['created',          'canceled'],
+        array['partially_funded', 'partially_funded'],
+        array['partially_funded', 'active'],
+        array['partially_funded', 'canceled'],
+        array['active',           'release_pending'],
+        array['active',           'released'],
+        array['active',           'refunded'],
+        array['active',           'disputed'],
+        array['release_pending',  'released'],
+        array['release_pending',  'refunded'],
+        array['release_pending',  'canceled'],
+        array['release_pending',  'disputed'],
+        array['disputed',         'released'],
+        array['disputed',         'refunded']
     ];
     is_valid boolean := false;
     now_ts timestamptz := now();
@@ -131,8 +196,8 @@ begin
        set state                   = p_new_state,
             updated_at              = now_ts,
             -- conditionally set dispute timestamps
-            dispute_opened_at       = case when p_new_state = 'DISPUTED' then now_ts else dispute_opened_at end,
-            dispute_resolved_at     = case when p_expected_state = 'DISPUTED' and p_new_state in ('SETTLED', 'CANCELLED') then now_ts else dispute_resolved_at end,
+            dispute_opened_at       = case when p_new_state = 'disputed' then now_ts else dispute_opened_at end,
+            dispute_resolved_at     = case when p_expected_state = 'disputed' and p_new_state in ('released', 'refunded') then now_ts else dispute_resolved_at end,
             -- apply p_extra columns (coalesce prefers explicit value, falls back to existing)
             blink_payment_hash      = coalesce((p_extra->>'blink_payment_hash')::text,       blink_payment_hash),
             blink_payment_request   = coalesce((p_extra->>'blink_payment_request')::text,    blink_payment_request),
@@ -149,19 +214,12 @@ begin
 end;
 $$;
 
+revoke all on function public.transition_escrow_state(uuid, text, text, jsonb) from public, anon, authenticated;
+grant execute on function public.transition_escrow_state(uuid, text, text, jsonb) to service_role;
+
 -- ============================================================================
 -- updated_at auto-maintenance trigger
 -- ============================================================================
-
-create or replace function public.set_updated_at()
-returns trigger
-language plpgsql
-as $$
-begin
-    new.updated_at := now();
-    return new;
-end;
-$$;
 
 drop trigger if exists trg_escrow_updated_at on public.escrow_instances;
 create trigger trg_escrow_updated_at

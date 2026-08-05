@@ -13,7 +13,7 @@ The service is discoverable on the Nostr network via signed `kind 30361` escrow 
 - **Three funding models**
   - `single_funder` — one invoice on the escrow row; the creator is the funder.
   - `two_party` — per-participant invoices in `escrow_funders`; funded only when both invoices are paid.
-  - `n_of_m` — per-participant invoices; funded once at least `funding_threshold` (M) of `participant_count` (N) funders have paid.
+  - `m_of_n` — per-participant invoices; active once at least `funding_threshold` (M) of `participant_count` (N) funders have paid.
 - **Five release-decision formats** (configurable subset per deployment):
   `mutual_consent`, `operator_decision`, `oracle_signature`, `application_signed_result`, `threshold_participant_signatures`.
 - **Lightning custody via [Blink](https://blink.sv)** — invoice creation, payment status, and payouts to Lightning addresses / BOLT11.
@@ -50,10 +50,11 @@ schema.sql                      Postgres schema + transition_escrow_state RPC
 ### Escrow state machine
 
 ```
-CREATED ──► PENDING_FUNDING ──► FUNDED ──► SETTLED
-   │            │                   │
-   │            └──► CANCELLED  ◄───┤
-   └────────► CANCELLED             └──► DISPUTED ──► SETTLED / CANCELLED
+created ──► partially_funded ──► active ──► release_pending
+   │                 │              │               │
+   └──► canceled ◄───┘              ├──► released ◄─┤
+                                    ├──► refunded ◄─┤
+                                    └──► disputed ──┘
 ```
 
 Transitions are enforced atomically by the `transition_escrow_state` Postgres RPC in `schema.sql`.
@@ -86,6 +87,9 @@ Key variables:
 | `FUNDING_MODEL` | Default funding model when a `create` omits it. |
 | `ACCEPTED_FUNDING_MODELS` | Comma-separated subset this deployment accepts. |
 | `ACCEPTED_RELEASE_DECISIONS` | Comma-separated subset of decision formats accepted. |
+| `FUNDING_TIMEOUT_SECONDS` | Maximum funding phase before partial sides may be canceled and refunded. |
+| `DECISION_MAX_AGE_SECONDS` | Maximum accepted release-decision age. |
+| `ORACLE_PUBKEYS` | Trusted oracle identities when `oracle_signature` is advertised. |
 | `OPERATOR_PUBKEY` / `OPERATOR_NSEC` | Operator Nostr identity (npub/hex and nsec). |
 | `APPLICATION_SIGNER_PUBKEYS` | Pubkeys authorized for `application_signed_result` decisions. |
 | `SUPABASE_PROJECT_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase backend. |
@@ -118,18 +122,18 @@ All protected routes live under `SERVICE_PATH_PREFIX` (default `/pontmore/v1`) a
 | --- | --- | --- |
 | `GET` | `/health` | Liveness + backend status. |
 | `GET` | `/pontmore/v1/descriptor` | The PIP-01 escrow descriptor (service block rewritten live). |
-| `GET` | `/pontmore/v1/openapi.json` | The normative wire contract (schema_url). |
+| `GET` | `/pontmore/v1/openapi/v1.0.0.json` | The immutable normative wire contract (`schema_url`). |
 
 ### Protected (NIP-98)
 
 | Method | Path | Body | Description |
 | --- | --- | --- | --- |
-| `POST` | `/pontmore/v1/create` | `amount_sats`, `description`, `refund_ln_address`, `idempotency_key`, `invitation_token`, `funding_model`, `funding_threshold`, `participant_count` | Open a new escrow or join by invitation. |
+| `POST` | `/pontmore/v1/create` | New: `amount_sats`, `participant_pubkeys`, model fields. Join: `enrollment_token`. | Open an escrow or redeem a signer-bound enrollment. |
 | `POST` | `/pontmore/v1/funding_instructions` | `escrow_id` | Return/create the Lightning invoice to fund. |
 | `POST` | `/pontmore/v1/fund_status` | `escrow_id` | Observe funding state (per-funder for multi-party). |
 | `POST` | `/pontmore/v1/release` | `escrow_id`, `release_decision`, `recipient`, `signatures`, `nonce`, `timestamp`, `result` | Release funds to the payee. |
 | `POST` | `/pontmore/v1/refund` | same as release | Refund funds to the funder(s). |
-| `POST` | `/pontmore/v1/cancel` | `escrow_id` | Cancel an unfunded/terminal escrow. |
+| `POST` | `/pontmore/v1/cancel` | `escrow_id` | Cancel before funding, or after funding timeout with automatic partial refunds. |
 
 ### Operator (NIP-98 + `OPERATOR_PUBKEY`)
 
@@ -159,7 +163,7 @@ Supported formats:
 
 - **`mutual_consent`** — signatures from all bound participants.
 - **`operator_decision`** — a signature from the configured `OPERATOR_PUBKEY`.
-- **`oracle_signature`** — a signature from a referenced `oracle_pubkey`.
+- **`oracle_signature`** — a signature from an `oracle_pubkey` registered in `ORACLE_PUBKEYS`.
 - **`application_signed_result`** — a signature from a configured `APPLICATION_SIGNER_PUBKEYS` entry, bound to a `result` payload.
 - **`threshold_participant_signatures`** — at least `threshold` distinct participant signatures.
 
@@ -187,7 +191,7 @@ node scripts/publish-descriptor.js --publish   # broadcast to Nostr relays
 
 The service runs as a plain Express app (`node server.js`) on any Node host. An [Appwrite Functions](https://appwrite.io) adapter is also provided in `src/main.js` (see `appwrite.config.json`); the same Express `app` is bridged through the Appwrite request/response shape.
 
-Set `SERVICE_BASE_URL` to the public URL of the deployment so the descriptor and OpenAPI server block are rewritten correctly. Cron jobs (auto-release of expired funded escrows, zombie cleanup, pending-payout recovery) run only when the backend is configured.
+Set `SERVICE_BASE_URL` to the public URL of the deployment so the descriptor and OpenAPI server block are rewritten correctly. Cron jobs cancel funding-timeout escrows with partial refunds and recover pending release payouts. The service never auto-releases without a valid decision.
 
 ---
 
