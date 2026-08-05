@@ -24,7 +24,7 @@ const path = require('path');
 const express = require('express');
 const cron = require('node-cron');
 
-const { config, hasBackend, isMockMode } = require('./config/env');
+const { config, hasBackend } = require('./config/env');
 const { requireNostrAuth } = require('./lib/nostr-auth');
 const { decodeNsec } = require('./lib/nostr-keys');
 const escrow = require('./lib/escrow');
@@ -113,12 +113,12 @@ app.get(path.join(config.SERVICE_PATH_PREFIX, 'descriptor'), (_req, res) => {
     descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
   }
+  descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
   descriptor.updated_at = Math.floor(Date.now() / 1000);
   res.json(descriptor);
 });
 
-// Serve the OpenAPI wire contract (the schema_url target).
-app.get(path.join(config.SERVICE_PATH_PREFIX, 'openapi.json'), (_req, res) => {
+function serveOpenApi(_req, res) {
   const schemaPath = path.join(__dirname, 'public', 'openapi.json');
   const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
 
@@ -127,7 +127,11 @@ app.get(path.join(config.SERVICE_PATH_PREFIX, 'openapi.json'), (_req, res) => {
     schema.servers[0].url = config.SERVICE_ENDPOINT;
   }
   res.json(schema);
-});
+}
+
+// Keep the unversioned route for human discovery; descriptors use the immutable path.
+app.get(path.join(config.SERVICE_PATH_PREFIX, 'openapi.json'), serveOpenApi);
+app.get(path.join(config.SERVICE_PATH_PREFIX, 'openapi', 'v1.0.0.json'), serveOpenApi);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Operator web UI (static, no auth)
@@ -168,7 +172,8 @@ app.post(path.join(PREFIX, 'create'), requireBackend, requireNostrAuth, async (r
       description:      req.body.description,
       refundLnAddress:  req.body.refund_ln_address,
       idempotencyKey:   req.body.idempotency_key,
-      invitationToken:  req.body.invitation_token,
+      enrollmentToken:  req.body.enrollment_token,
+      participantPubkeys: req.body.participant_pubkeys,
       fundingModel:     req.body.funding_model,
       fundingThreshold: req.body.funding_threshold,
       participantCount: req.body.participant_count,
@@ -304,7 +309,7 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
     const { outcome, resolution_mode, note } = req.body;
 
     const escrow = await getEscrowInstance(escrowId);
-    if (escrow.state !== 'DISPUTED') throw new ValidationError(`escrow is ${escrow.state}, not DISPUTED`);
+    if (escrow.state !== 'disputed') throw new ValidationError(`escrow is ${escrow.state}, not disputed`);
 
     const resolved = await resolveDispute(escrowId, {
       outcome,
@@ -381,6 +386,7 @@ app.get(path.join(PREFIX, 'operator', 'descriptor'), (_req, res) => {
     descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
   }
+  descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
   descriptor.updated_at = Math.floor(Date.now() / 1000);
   res.json(descriptor);
 });
@@ -531,69 +537,6 @@ app.post(path.join(PREFIX, 'operator', 'unpublish'), requireBackend, requireNost
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test-only endpoints (available ONLY when BLINK_MODE=mock)
-//
-// These simulate Lightning invoice payments and payouts so the full escrow flow
-// can be exercised end-to-end without real sats. They are never registered in
-// real (production) mode. Still require NIP-98 auth so they are not anonymous.
-// ─────────────────────────────────────────────────────────────────────────────
-
-if (isMockMode()) {
-  app.post(path.join(PREFIX, 'test', 'pay-invoice'), requireBackend, requireNostrAuth, async (req, res) => {
-    try {
-      const { payment_hash } = req.body;
-      if (!payment_hash || !/^[0-9a-f]{64}$/i.test(payment_hash)) {
-        return res.status(400).json({ error: 'payment_hash must be a 64-char hex string' });
-      }
-      if (typeof blink.markInvoicePaid !== 'function') {
-        return res.status(503).json({ error: 'test endpoints require BLINK_MODE=mock' });
-      }
-      const ok = blink.markInvoicePaid(payment_hash);
-      if (!ok) return res.status(404).json({ error: 'no mock invoice found for that payment_hash' });
-      res.json({ payment_hash, status: 'PAID' });
-    } catch (err) {
-      handleError(res, err);
-    }
-  });
-
-  app.post(path.join(PREFIX, 'test', 'pay-escrow'), requireBackend, requireNostrAuth, async (req, res) => {
-    try {
-      const { escrow_id } = req.body;
-      if (!escrow_id) return res.status(400).json({ error: 'escrow_id is required' });
-      if (typeof blink.markInvoicePaid !== 'function') {
-        return res.status(503).json({ error: 'test endpoints require BLINK_MODE=mock' });
-      }
-
-      const inst = await getEscrowInstance(escrow_id);
-      const paid = [];
-      if (inst.blink_payment_hash) {
-        blink.markInvoicePaid(inst.blink_payment_hash);
-        paid.push(inst.blink_payment_hash);
-      }
-      const funders = await listFunders(escrow_id);
-      for (const f of funders) {
-        if (f.blink_payment_hash && !paid.includes(f.blink_payment_hash)) {
-          blink.markInvoicePaid(f.blink_payment_hash);
-          paid.push(f.blink_payment_hash);
-        }
-      }
-      res.json({ escrow_id, paid_invoices: paid, count: paid.length });
-    } catch (err) {
-      handleError(res, err);
-    }
-  });
-
-  app.get(path.join(PREFIX, 'test', 'mock-invoices'), requireBackend, requireNostrAuth, async (_req, res) => {
-    if (typeof blink.listInvoices !== 'function') {
-      return res.status(503).json({ error: 'test endpoints require BLINK_MODE=mock' });
-    }
-    res.json({ invoices: blink.listInvoices() });
-  });
-
-  console.warn('[startup] TEST ENDPOINTS ENABLED (BLINK_MODE=mock). Do NOT use in production.');
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Error handling
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -614,7 +557,7 @@ app.use((req, res) => res.status(404).json({ error: 'not found' }));
 async function recoverPendingPayouts() {
   if (!hasBackend()) return;
   const { getSettledUnpaidEscrows, setPayoutSuccessful } = require('./services/supabase');
-  const { payToLightningAddress, satsToFiat } = require('./services/blink');
+  const { payToLightningAddress } = require('./services/blink');
   let pending;
   try { pending = await getSettledUnpaidEscrows(); }
   catch (err) { return console.error('[recovery] query failed:', err.message); }
@@ -634,45 +577,15 @@ async function recoverPendingPayouts() {
   }
 }
 
-let isAutoReleasing = false;
-async function processAutoReleases() {
-  if (!hasBackend() || isAutoReleasing) return;
-  isAutoReleasing = true;
-  try {
-    const { getExpiredFundedEscrows, transitionState, setPayoutSuccessful } = require('./services/supabase');
-    const { payToLightningAddress } = require('./services/blink');
-    let expired;
-    try { expired = await getExpiredFundedEscrows(3); }
-    catch (err) { return console.error('[cron] expired query failed:', err.message); }
-    if (!expired.length) return;
-
-    for (const row of expired) {
-      try { await transitionState(row.escrow_id, 'FUNDED', 'SETTLED'); }
-      catch (err) { continue; }
-      const addr = row.payout_ln_address;
-      if (addr) {
-        try {
-          await payToLightningAddress({ lnAddress: addr, amountSats: row.amount_sats });
-          await setPayoutSuccessful(row.escrow_id);
-        } catch (err) {
-          console.warn(`[cron] auto-release payout failed for ${row.escrow_id}: ${err.message}`);
-        }
-      }
-    }
-  } finally {
-    isAutoReleasing = false;
-  }
-}
-
 async function cleanupZombieEscrows() {
   if (!hasBackend()) return;
-  const { getExpiredPendingEscrows, transitionState } = require('./services/supabase');
+  const { getExpiredPendingEscrows } = require('./services/supabase');
   let dead;
-  try { dead = await getExpiredPendingEscrows(24); }
+  try { dead = await getExpiredPendingEscrows(); }
   catch { return; }
   for (const row of dead) {
-    try { await transitionState(row.escrow_id, 'PENDING_FUNDING', 'CANCELLED'); }
-    catch { /* ignore collision */ }
+    try { await escrow.cancel({ escrowId: row.escrow_id, authPubkey: row.creator_pubkey }); }
+    catch (err) { console.warn(`[cron] funding-timeout cancellation failed for ${row.escrow_id}: ${err.message}`); }
   }
 }
 
@@ -702,7 +615,6 @@ async function init() {
       console.warn(`[startup] Backend init failed: ${err.message}`);
     }
 
-    cron.schedule('0 * * * *', processAutoReleases);
     cron.schedule('0 0 * * *', cleanupZombieEscrows);
     console.log('[startup] Cron jobs scheduled.');
   } else {

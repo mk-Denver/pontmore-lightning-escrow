@@ -7,7 +7,7 @@
  * The escrow operator holds custody of the BTC wallet; participants fund by
  * paying a hold invoice and receive payouts to Lightning Addresses or BOLT11.
  *
- * This module is selected by services/blink.js when BLINK_MODE=real (default).
+ * This is the only supported Lightning backend.
  */
 
 const { config } = require('../config/env');

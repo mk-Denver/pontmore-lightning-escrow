@@ -63,12 +63,14 @@ class ValidationError extends Error {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const VALID_TRANSITIONS = Object.freeze({
-  CREATED:         ['PENDING_FUNDING', 'CANCELLED'],
-  PENDING_FUNDING: ['PENDING_FUNDING', 'FUNDED', 'CANCELLED'],
-  FUNDED:          ['SETTLED', 'DISPUTED', 'CANCELLED'],
-  DISPUTED:        ['SETTLED', 'CANCELLED'],
-  SETTLED:         [],
-  CANCELLED:       [],
+  created:          ['created', 'partially_funded', 'active', 'canceled'],
+  partially_funded: ['partially_funded', 'active', 'canceled'],
+  active:           ['release_pending', 'released', 'refunded', 'disputed'],
+  release_pending:  ['released', 'refunded', 'canceled', 'disputed'],
+  disputed:         ['released', 'refunded'],
+  released:         [],
+  refunded:         [],
+  canceled:         [],
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,10 +78,10 @@ const VALID_TRANSITIONS = Object.freeze({
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Create a new escrow instance in state CREATED.
+ * Create a new escrow instance in state created.
  * `creator_pubkey` is the authenticated Nostr pubkey of the participant who
  * called `create`. In single_funder mode the creator is the funder.
- * fundingThreshold and participantCount are stored for two_party / n_of_m.
+ * fundingThreshold and participantCount are stored for two_party / m_of_n.
  */
 async function createEscrowInstance({
   creatorPubkey,
@@ -100,11 +102,10 @@ async function createEscrowInstance({
       .from('escrow_instances')
       .select('*')
       .eq('idempotency_key', idempotencyKey)
+      .eq('creator_pubkey', creatorPubkey)
       .maybeSingle();
-    if (existing) return existing;
+    if (existing) return { ...existing, _idempotent: true };
   }
-
-  const invitationToken = crypto.randomUUID().replace(/-/g, '');
 
   const { data, error } = await db
     .from('escrow_instances')
@@ -118,14 +119,90 @@ async function createEscrowInstance({
       participant_count: participantCount ?? null,
       refund_ln_address: refundLnAddress ?? null,
       idempotency_key:   idempotencyKey ?? null,
-      invitation_token:  invitationToken,
-      state:             'CREATED',
+      funding_deadline:  new Date(Date.now() + config.FUNDING_TIMEOUT_SECONDS * 1000).toISOString(),
+      state:             'created',
     })
     .select()
     .single();
 
+  if (error?.code === '23505' && idempotencyKey) {
+    const { data: existing, error: fetchError } = await db.from('escrow_instances')
+      .select('*')
+      .eq('creator_pubkey', creatorPubkey)
+      .eq('idempotency_key', idempotencyKey)
+      .maybeSingle();
+    if (fetchError || !existing) {
+      throw new Error(`[supabase] createEscrowInstance recovery failed: ${fetchError?.message || 'row unavailable'}`);
+    }
+    return { ...existing, _idempotent: true };
+  }
   if (error) throw new Error(`[supabase] createEscrowInstance failed: ${error.message}`);
   return data;
+}
+
+async function createEnrollment(escrowId, participantPubkey) {
+  const token = crypto.randomUUID().replace(/-/g, '');
+  const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
+  const { error } = await supabase().from('escrow_enrollments').insert({
+    escrow_id: escrowId,
+    token_hash: tokenHash,
+    enrollment_token: token,
+    participant_pubkey: participantPubkey,
+  });
+  if (error?.code === '23505') {
+    const { data: existing, error: fetchError } = await supabase().from('escrow_enrollments')
+      .select('enrollment_token')
+      .eq('escrow_id', escrowId)
+      .eq('participant_pubkey', participantPubkey)
+      .maybeSingle();
+    if (fetchError || !existing?.enrollment_token) {
+      throw new Error(`[supabase] createEnrollment recovery failed: ${fetchError?.message || 'token unavailable'}`);
+    }
+    return existing.enrollment_token;
+  }
+  if (error) throw new Error(`[supabase] createEnrollment failed: ${error.message}`);
+  return token;
+}
+
+async function listEnrollments(escrowId) {
+  const { data, error } = await supabase().from('escrow_enrollments')
+    .select('participant_pubkey,enrollment_token,redeemed_at').eq('escrow_id', escrowId);
+  if (error) throw new Error(`[supabase] listEnrollments failed: ${error.message}`);
+  return data ?? [];
+}
+
+async function consumeEnrollment(token, participantPubkey) {
+  const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
+  const db = supabase();
+  const { data, error } = await db
+    .from('escrow_enrollments')
+    .select()
+    .eq('token_hash', tokenHash)
+    .eq('participant_pubkey', participantPubkey)
+    .is('redeemed_at', null)
+    .maybeSingle();
+  if (error) throw new Error(`[supabase] consumeEnrollment failed: ${error.message}`);
+  if (!data) throw new ValidationError('invalid, already-used, or signer-mismatched enrollment token');
+  return getEscrowInstance(data.escrow_id);
+}
+
+async function redeemEnrollment(token, participantPubkey) {
+  const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
+  const { data, error } = await supabase().from('escrow_enrollments')
+    .update({ redeemed_at: new Date().toISOString() })
+    .eq('token_hash', tokenHash)
+    .eq('participant_pubkey', participantPubkey)
+    .is('redeemed_at', null)
+    .select()
+    .maybeSingle();
+  if (error) throw new Error(`[supabase] redeemEnrollment failed: ${error.message}`);
+  if (!data) throw new StateConflictError(data?.escrow_id ?? 'unknown', 'unredeemed enrollment');
+}
+
+async function consumeDecisionNonce(escrowId, nonce) {
+  const { error } = await supabase().from('escrow_decision_nonces').insert({ escrow_id: escrowId, nonce });
+  if (error && error.code === '23505') throw new ValidationError('release decision nonce has already been used');
+  if (error) throw new Error(`[supabase] consumeDecisionNonce failed: ${error.message}`);
 }
 
 /**
@@ -146,15 +223,15 @@ async function getEscrowInstance(escrowId) {
 }
 
 /**
- * Counterparty joins an escrow instance using a service-issued invitation token.
- * Binds the counterparty pubkey and transitions CREATED -> PENDING_FUNDING.
+ * Counterparty joins an escrow instance after a signer-bound enrollment token
+ * has been consumed by the caller.
  *
  * For single_funder: one counterparty joins.
  * For two_party: one counterparty joins (2 participants total).
- * For n_of_m: multiple participants may join until participant_count is reached.
+ * For m_of_n: multiple participants may join until participant_count is reached.
  *             Each joiner is recorded as a funder row.
  */
-async function joinEscrowInstance(escrowId, invitationToken, joinerPubkey, payoutLnAddress) {
+async function joinEscrowInstance(escrowId, joinerPubkey, payoutLnAddress) {
   const db = supabase();
   const { data: existing, error: fetchErr } = await db
     .from('escrow_instances')
@@ -164,9 +241,8 @@ async function joinEscrowInstance(escrowId, invitationToken, joinerPubkey, payou
   if (fetchErr) throw new Error(`[supabase] joinEscrowInstance fetch failed: ${fetchErr.message}`);
   if (!existing) throw new NotFoundError('Escrow instance', escrowId);
 
-  if (existing.state !== 'CREATED') throw new StateConflictError(escrowId, 'CREATED');
+  if (existing.state !== 'created') throw new StateConflictError(escrowId, 'created');
   if (existing.creator_pubkey === joinerPubkey) throw new ValidationError('Creator cannot join their own escrow as a counterparty.');
-  if (existing.invitation_token !== invitationToken) throw new ValidationError('Invalid invitation token.');
 
   const model = existing.funding_model;
 
@@ -179,16 +255,17 @@ async function joinEscrowInstance(escrowId, invitationToken, joinerPubkey, payou
       .update({
         counterparty_pubkey: joinerPubkey,
         payout_ln_address:   payoutLnAddress ?? null,
-        state:               'PENDING_FUNDING',
+        state:               'created',
         updated_at:          new Date().toISOString(),
       })
       .eq('escrow_id', escrowId)
-      .eq('state', 'CREATED')
+      .eq('state', 'created')
+      .is('counterparty_pubkey', null)
       .select()
       .single();
 
     if (error) throw new Error(`[supabase] joinEscrowInstance failed: ${error.message}`);
-    if (!data) throw new StateConflictError(escrowId, 'CREATED');
+    if (!data) throw new StateConflictError(escrowId, 'created');
 
     // For two_party, seed funder rows for both participants.
     if (model === 'two_party') {
@@ -200,9 +277,9 @@ async function joinEscrowInstance(escrowId, invitationToken, joinerPubkey, payou
     return data;
   }
 
-  // n_of_m: multiple participants. Counterparty field holds the last joiner,
+  // m_of_n: multiple participants. Counterparty field holds the last joiner,
   // but all participants are tracked in escrow_funders.
-  if (model === 'n_of_m') {
+  if (model === 'm_of_n') {
     const maxParticipants = existing.participant_count || 0;
 
     // Seed creator funder row on first join if not yet present.
@@ -228,24 +305,21 @@ async function joinEscrowInstance(escrowId, invitationToken, joinerPubkey, payou
     await seedFunderRow(db, escrowId, joinerPubkey, 'counterparty',
       existing.amount_sats, existing.platform_fee_sats, null, payoutLnAddress ?? null);
 
-    const newCount = currentCount + 1;
-    const isFull = newCount >= maxParticipants;
-
     const { data, error } = await db
       .from('escrow_instances')
       .update({
         counterparty_pubkey: joinerPubkey,
         payout_ln_address:   payoutLnAddress ?? null,
-        state:              isFull ? 'PENDING_FUNDING' : 'CREATED',
+        state:              'created',
         updated_at:         new Date().toISOString(),
       })
       .eq('escrow_id', escrowId)
-      .eq('state', 'CREATED')
+      .eq('state', 'created')
       .select()
       .single();
 
-    if (error) throw new Error(`[supabase] joinEscrowInstance (n_of_m) failed: ${error.message}`);
-    if (!data) throw new StateConflictError(escrowId, 'CREATED');
+    if (error) throw new Error(`[supabase] joinEscrowInstance (m_of_n) failed: ${error.message}`);
+    if (!data) throw new StateConflictError(escrowId, 'created');
     return data;
   }
 
@@ -273,19 +347,19 @@ async function seedFunderRow(db, escrowId, funderPubkey, role, amountSats, platf
 }
 
 /**
- * Stamp the funding invoice (payment hash + request) onto a PENDING_FUNDING
+ * Stamp the funding invoice onto an instance in the funding phase.
  * instance. Uses a self-transition so it is safe to retry.
  * For single_funder the invoice is stamped directly on the escrow row.
  */
 async function setFundingInvoice(escrowId, paymentHash, paymentRequest) {
-  return transitionState(escrowId, 'PENDING_FUNDING', 'PENDING_FUNDING', {
+  return transitionState(escrowId, 'created', 'created', {
     blink_payment_hash: paymentHash,
     blink_payment_request: paymentRequest,
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Funder-level operations (two_party / n_of_m)
+// Funder-level operations (two_party / m_of_n)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -426,45 +500,29 @@ async function setPayoutSuccessful(escrowId) {
 }
 
 /**
- * Fetch all SETTLED escrows whose payout has not been confirmed (recovery set).
+ * Fetch all released escrows whose payout has not been confirmed (recovery set).
  */
 async function getSettledUnpaidEscrows() {
   const db = supabase();
   const { data, error } = await db
     .from('escrow_instances')
     .select('*')
-    .eq('state', 'SETTLED')
+    .eq('state', 'released')
     .eq('payout_successful', false);
   if (error) throw new Error(`[supabase] getSettledUnpaidEscrows failed: ${error.message}`);
   return data ?? [];
 }
 
 /**
- * Fetch all FUNDED escrows older than X days (auto-release candidates).
+ * Fetch funding-phase escrows whose declared deadline has elapsed.
  */
-async function getExpiredFundedEscrows(days = 3) {
+async function getExpiredPendingEscrows() {
   const db = supabase();
-  const threshold = new Date(Date.now() - (days * 24 * 60 * 60 * 1000)).toISOString();
   const { data, error } = await db
     .from('escrow_instances')
     .select('*')
-    .eq('state', 'FUNDED')
-    .lt('updated_at', threshold);
-  if (error) throw new Error(`[supabase] getExpiredFundedEscrows failed: ${error.message}`);
-  return data ?? [];
-}
-
-/**
- * Fetch all PENDING_FUNDING escrows older than X hours (zombie cleanup).
- */
-async function getExpiredPendingEscrows(hours = 24) {
-  const db = supabase();
-  const threshold = new Date(Date.now() - (hours * 60 * 60 * 1000)).toISOString();
-  const { data, error } = await db
-    .from('escrow_instances')
-    .select('*')
-    .eq('state', 'PENDING_FUNDING')
-    .lt('updated_at', threshold);
+    .in('state', ['created', 'partially_funded'])
+    .lt('funding_deadline', new Date().toISOString());
   if (error) throw new Error(`[supabase] getExpiredPendingEscrows failed: ${error.message}`);
   return data ?? [];
 }
@@ -486,7 +544,7 @@ async function listEscrowInstances({ state, limit, offset } = {}) {
 }
 
 async function fileDispute(escrowId, { disputeClass, summary, openedBy }) {
-  await transitionState(escrowId, 'FUNDED', 'DISPUTED', {
+  await transitionState(escrowId, 'active', 'disputed', {
     dispute_class:   disputeClass,
     dispute_summary: summary ?? '',
     dispute_opened_by: openedBy,
@@ -496,12 +554,12 @@ async function fileDispute(escrowId, { disputeClass, summary, openedBy }) {
 
 async function resolveDispute(escrowId, { outcome, resolutionMode, note }) {
   if (outcome === 'release') {
-    await transitionState(escrowId, 'DISPUTED', 'SETTLED', {
+    await transitionState(escrowId, 'disputed', 'released', {
       dispute_resolution_mode: resolutionMode,
       dispute_resolution_note: note ?? '',
     });
   } else if (outcome === 'refund') {
-    await transitionState(escrowId, 'DISPUTED', 'CANCELLED', {
+    await transitionState(escrowId, 'disputed', 'refunded', {
       dispute_resolution_mode: resolutionMode,
       dispute_resolution_note: note ?? '',
     });
@@ -520,18 +578,22 @@ module.exports = {
   createEscrowInstance,
   getEscrowInstance,
   joinEscrowInstance,
+  createEnrollment,
+  listEnrollments,
+  consumeEnrollment,
+  redeemEnrollment,
+  consumeDecisionNonce,
   setFundingInvoice,
   transitionState,
   transitionEscrowState,
   setReleaseDecision,
   setPayoutSuccessful,
   getSettledUnpaidEscrows,
-  getExpiredFundedEscrows,
   getExpiredPendingEscrows,
   listEscrowInstances,
   fileDispute,
   resolveDispute,
-  // Funder-level operations (two_party / n_of_m)
+  // Funder-level operations (two_party / m_of_n)
   getFunderRow,
   setFunderInvoice,
   setFunderFunded,

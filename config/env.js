@@ -108,16 +108,17 @@ const PARTICIPANT_COUNT     = (function () {
 })();
 const FIAT_CURRENCY         = optionalString('FIAT_CURRENCY', 'KES');
 const NIP98_MAX_AGE_SECONDS = Number(process.env.NIP98_MAX_AGE_SECONDS) || 60;
+const FUNDING_TIMEOUT_SECONDS = Number(process.env.FUNDING_TIMEOUT_SECONDS) || 86400;
+const DECISION_MAX_AGE_SECONDS = Number(process.env.DECISION_MAX_AGE_SECONDS) || 300;
 
-// Blink backend mode: 'real' (default) hits the Blink GraphQL API; 'mock' uses
-// an in-memory fake backend so the full escrow flow can be exercised without
-// real Lightning sats. Mock mode also enables the /test/* endpoints.
-const BLINK_MODE = optionalString('BLINK_MODE', 'real').toLowerCase();
-if (BLINK_MODE !== 'real' && BLINK_MODE !== 'mock') {
-  throw new Error(`[config/env] BLINK_MODE must be 'real' or 'mock'. Got: "${BLINK_MODE}"`);
+if (!Number.isInteger(FUNDING_TIMEOUT_SECONDS) || FUNDING_TIMEOUT_SECONDS < 1) {
+  throw new Error('[config/env] FUNDING_TIMEOUT_SECONDS must be a positive integer');
+}
+if (!Number.isInteger(DECISION_MAX_AGE_SECONDS) || DECISION_MAX_AGE_SECONDS < 1) {
+  throw new Error('[config/env] DECISION_MAX_AGE_SECONDS must be a positive integer');
 }
 
-const VALID_FUNDING_MODELS = new Set(['single_funder', 'two_party', 'n_of_m']);
+const VALID_FUNDING_MODELS = new Set(['single_funder', 'two_party', 'm_of_n']);
 const VALID_RELEASE_DECISIONS = new Set([
   'mutual_consent', 'operator_decision', 'oracle_signature',
   'application_signed_result', 'threshold_participant_signatures',
@@ -130,7 +131,7 @@ if (!VALID_FUNDING_MODELS.has(FUNDING_MODEL)) {
 // Comma-separated list of funding models this deployment accepts on create.
 // Defaults to all three. FUNDING_MODEL becomes the default when create omits
 // an explicit funding_model.
-const ACCEPTED_FUNDING_MODELS = (process.env.ACCEPTED_FUNDING_MODELS || 'single_funder,two_party,n_of_m')
+const ACCEPTED_FUNDING_MODELS = (process.env.ACCEPTED_FUNDING_MODELS || 'single_funder,two_party,m_of_n')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -144,7 +145,7 @@ if (!ACCEPTED_FUNDING_MODELS.includes(FUNDING_MODEL)) {
   throw new Error(`[config/env] FUNDING_MODEL ("${FUNDING_MODEL}") must be included in ACCEPTED_FUNDING_MODELS (${ACCEPTED_FUNDING_MODELS.join(', ')})`);
 }
 
-// n_of_m threshold/count are always client-defined on each create request (see
+// m_of_n threshold/count are always client-defined on each create request (see
 // lib/escrow.js). FUNDING_THRESHOLD / PARTICIPANT_COUNT are NOT used as defaults
 // — they remain optional and are only advertised in the descriptor when set.
 // two_party always implies 2 participants / 2 required funders.
@@ -169,14 +170,24 @@ const APPLICATION_SIGNER_PUBKEYS = (process.env.APPLICATION_SIGNER_PUBKEYS || ''
   .filter(Boolean)
   .map(normalizePubkey);
 
+const ORACLE_PUBKEYS = (process.env.ORACLE_PUBKEYS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .map(normalizePubkey);
+
+if (ACCEPTED_RELEASE_DECISIONS.includes('oracle_signature') && ORACLE_PUBKEYS.length === 0) {
+  throw new Error('[config/env] ORACLE_PUBKEYS is required when oracle_signature is advertised');
+}
+
 const OPERATOR_PUBKEY = normalizePubkey(optionalStringOrBlank('OPERATOR_PUBKEY'));
 const OPERATOR_NSEC   = optionalStringOrBlank('OPERATOR_NSEC'); // nsec or hex privkey, used for signing descriptor events
 
 // Canonical endpoint for the first advertised transport (https).
 const SERVICE_ENDPOINT = SERVICE_BASE_URL.replace(/\/$/, '') + SERVICE_PATH_PREFIX;
 
-// Schema URL is served by this service itself at /openapi.json under the prefix.
-const SCHEMA_URL = SERVICE_ENDPOINT + '/openapi.json';
+// Versioned schema URL is stable for published standalone descriptors.
+const SCHEMA_URL = SERVICE_ENDPOINT + '/openapi/v1.0.0.json';
 
 const config = Object.freeze({
   PORT,
@@ -191,15 +202,17 @@ const config = Object.freeze({
   ACCEPTED_FUNDING_MODELS,
   ACCEPTED_RELEASE_DECISIONS,
   APPLICATION_SIGNER_PUBKEYS,
+  ORACLE_PUBKEYS,
   OPERATOR_PUBKEY,
   OPERATOR_NSEC,
   NIP98_MAX_AGE_SECONDS,
+  FUNDING_TIMEOUT_SECONDS,
+  DECISION_MAX_AGE_SECONDS,
   FIAT_CURRENCY,
 
   // Backend (may be blank until deployment)
   SUPABASE_PROJECT_URL:      optionalStringOrBlank('SUPABASE_PROJECT_URL'),
   SUPABASE_SERVICE_ROLE_KEY: optionalStringOrBlank('SUPABASE_SERVICE_ROLE_KEY'),
-  BLINK_MODE:                BLINK_MODE,
   BLINK_GRAPHQL_ENDPOINT:    optionalUrl('BLINK_GRAPHQL_ENDPOINT', 'https://graphql.blink.sv/graphql'),
   BLINK_API_KEY:             optionalStringOrBlank('BLINK_API_KEY'),
 
@@ -232,17 +245,10 @@ function splitPlatformFee(totalFeeSats) {
  * Whether the backend custody/database dependencies are configured.
  * The service refuses to start operation routes when false.
  *
- * In mock mode the Blink API key is not required (an in-memory fake backend is
- * used); only Supabase (persistence) must be configured to exercise the flow.
  */
 function hasBackend() {
   const hasDb = Boolean(config.SUPABASE_PROJECT_URL && config.SUPABASE_SERVICE_ROLE_KEY);
-  if (config.BLINK_MODE === 'mock') return hasDb;
   return Boolean(hasDb && config.BLINK_API_KEY);
 }
 
-function isMockMode() {
-  return config.BLINK_MODE === 'mock';
-}
-
-module.exports = { config, calculatePlatformFee, splitPlatformFee, hasBackend, isMockMode };
+module.exports = { config, calculatePlatformFee, splitPlatformFee, hasBackend };

@@ -67,21 +67,21 @@ curl -s -X POST https://standalone-escrow.onrender.com/pontmore/v1/create \
   }' | jq
 ```
 
-Response includes `escrow_id` and `invitation_token`. Save both.
+Response includes `escrow_id`, `funding_deadline`, and signer-bound `enrollments`.
 
 ### Create with two_party model
 ```bash
 ... -d '{"amount_sats":1000,"description":"two-party","funding_model":"two_party"}'
 ```
 
-### Create with n_of_m (3 of 5)
+### Create with m_of_n (3 of 5)
 ```bash
-... -d '{"amount_sats":1000,"description":"group buy","funding_model":"n_of_m","funding_threshold":3,"participant_count":5}'
+... -d '{"amount_sats":1000,"description":"group buy","funding_model":"m_of_n","funding_threshold":3,"participant_count":5,"participant_pubkeys":["<PUBKEY_B>","<PUBKEY_C>","<PUBKEY_D>","<PUBKEY_E>"]}'
 ```
 
 ### Join an existing instance by invitation (counterparty)
 ```bash
-... -d '{"amount_sats":1000,"invitation_token":"<INVITATION_TOKEN>","refund_ln_address":"seller@blink.sv"}'
+... -d '{"enrollment_token":"<BOUND_ENROLLMENT_TOKEN>","refund_ln_address":"seller@blink.sv"}'
 ```
 
 ---
@@ -108,7 +108,7 @@ curl -s -X POST https://standalone-escrow.onrender.com/pontmore/v1/fund_status \
   -d '{"escrow_id":"<ESCROW_ID>"}' | jq
 ```
 
-`state` becomes `FUNDED` once the invoice is paid. For multi-party models, the response also shows `funded_count`, `total_funders`, and `my_funded`.
+`state` becomes `active` once the funding condition is satisfied. Before that, funded multi-party instances are `partially_funded`.
 
 ---
 
@@ -204,7 +204,7 @@ curl -s -X POST https://standalone-escrow.onrender.com/pontmore/v1/refund \
 
 ## 7. Cancel an unfunded escrow
 
-Only works before funding (state `CREATED` or `PENDING_FUNDING`). No decision needed.
+Works in `created`, or in `partially_funded` after `funding_deadline`; funded sides are refunded before cancellation.
 
 ```bash
 curl -s -X POST https://standalone-escrow.onrender.com/pontmore/v1/cancel \
@@ -223,7 +223,7 @@ curl -s https://standalone-escrow.onrender.com/pontmore/v1/operator/escrows \
   -H 'Authorization: Nostr <base64-signed-event>' | jq
 
 # filter by state
-curl -s 'https://standalone-escrow.onrender.com/pontmore/v1/operator/escrows?state=FUNDED' \
+curl -s 'https://standalone-escrow.onrender.com/pontmore/v1/operator/escrows?state=active' \
   -H 'Authorization: Nostr <base64-signed-event>' | jq
 ```
 
