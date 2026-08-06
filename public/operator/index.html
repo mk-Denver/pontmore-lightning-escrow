@@ -456,6 +456,12 @@ ${r.dispute_class ? `
 <div class="field"><div class="field-label">Dispute Opened By</div><div class="field-value pubkey">${r.dispute_opened_by || '\u2014'}</div></div>
 <div class="field"><div class="field-label">Dispute Opened</div><div class="field-value">${fmtDate(r.dispute_opened_at)}</div></div>
 <div class="field"><div class="field-label">Dispute Summary</div><div class="field-value">${r.dispute_summary || '\u2014'}</div></div>
+${r.dispute_resolved_at ? `
+<div class="field"><div class="field-label">Outcome</div><div class="field-value">${r.state === 'released' ? 'Released to counterparty' : r.state === 'refunded' ? 'Refunded to funder(s)' : r.state}</div></div>
+<div class="field"><div class="field-label">Recipient</div><div class="field-value pubkey">${r.state === 'released' ? (r.counterparty_pubkey || '\u2014') : (r.creator_pubkey || '\u2014')}</div></div>
+<div class="field"><div class="field-label">Amount</div><div class="field-value">${r.amount_sats} sats</div></div>
+<div class="field"><div class="field-label">Payout Sent</div><div class="field-value">${r.payout_successful ? 'Yes' : 'No (pending)'}</div></div>
+` : ''}
 <div class="field"><div class="field-label">Resolution Mode</div><div class="field-value">${r.dispute_resolution_mode ? renderLabel(RESOLUTION_MODES, r.dispute_resolution_mode) : '\u2014'}</div></div>
 <div class="field"><div class="field-label">Resolution Note</div><div class="field-value">${r.dispute_resolution_note || '\u2014'}</div></div>
 <div class="field"><div class="field-label">Resolved At</div><div class="field-value">${fmtDate(r.dispute_resolved_at)}</div></div>
