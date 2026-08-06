@@ -35,6 +35,7 @@ const {
   getEscrowInstance,
   fileDispute,
   resolveDispute,
+  claimPayoutAttempt,
   setPayoutSuccessful,
   listFunders,
 } = require('./services/supabase');
@@ -45,6 +46,22 @@ const { sha256 } = require('@noble/hashes/sha256');
 const WebSocket = require('ws');
 
 const NOSTR_RELAYS = ['wss://nos.lol', 'wss://relay.damus.io'];
+
+function payoutIdempotencyKey(escrowId) {
+  return `escrow-payout:${escrowId}`;
+}
+
+async function claimAndSendLightningPayout({ escrowId, lnAddress, amountSats }) {
+  const claimed = await claimPayoutAttempt(escrowId);
+  if (!claimed) return false;
+  await blink.payToLightningAddress({
+    lnAddress,
+    amountSats,
+    idempotencyKey: payoutIdempotencyKey(escrowId),
+  });
+  await setPayoutSuccessful(escrowId);
+  return true;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // App setup
@@ -301,10 +318,11 @@ app.get(path.join(PREFIX, 'operator', 'escrows', ':escrowId'), requireBackend, r
 
 app.post(path.join(PREFIX, 'operator', 'disputes'), requireBackend, requireNostrAuth, requireOperator, async (req, res) => {
   try {
-    const result = await fileDispute(req.body.escrow_id, {
+    const result = await fileDispute({
+      escrowId:     req.body.escrow_id,
+      authPubkey:   req.authPubkey,
       disputeClass: req.body.dispute_class,
       summary:      req.body.summary,
-      openedBy:     req.authPubkey,
     });
     res.json({
       escrow_id:      result.escrow_id,
@@ -337,8 +355,7 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
       const addr = escrow.payout_ln_address;
       if (addr && addr.includes('@')) {
         try {
-          await blink.payToLightningAddress({ lnAddress: addr, amountSats: payoutSats });
-          await setPayoutSuccessful(escrowId);
+          await claimAndSendLightningPayout({ escrowId, lnAddress: addr, amountSats: payoutSats });
         } catch (err) {
           return res.json({
             escrow_id:        resolved.escrow_id,
@@ -353,8 +370,7 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
       const addr = escrow.refund_ln_address;
       if (addr && addr.includes('@')) {
         try {
-          await blink.payToLightningAddress({ lnAddress: addr, amountSats: payoutSats });
-          await setPayoutSuccessful(escrowId);
+          await claimAndSendLightningPayout({ escrowId, lnAddress: addr, amountSats: payoutSats });
         } catch (err) {
           return res.json({
             escrow_id:        resolved.escrow_id,
@@ -570,8 +586,7 @@ app.use((req, res) => res.status(404).json({ error: 'not found' }));
 
 async function recoverPendingPayouts() {
   if (!hasBackend()) return;
-  const { getSettledUnpaidEscrows, setPayoutSuccessful } = require('./services/supabase');
-  const { payToLightningAddress } = require('./services/blink');
+  const { getSettledUnpaidEscrows } = require('./services/supabase');
   let pending;
   try { pending = await getSettledUnpaidEscrows(); }
   catch (err) { return console.error('[recovery] query failed:', err.message); }
@@ -582,8 +597,7 @@ async function recoverPendingPayouts() {
     const addr = row.payout_ln_address;
     if (!addr) continue;
     try {
-      await payToLightningAddress({ lnAddress: addr, amountSats: payoutSats });
-      await setPayoutSuccessful(row.escrow_id);
+      await claimAndSendLightningPayout({ escrowId: row.escrow_id, lnAddress: addr, amountSats: payoutSats });
       console.log(`[recovery] payout settled for ${row.escrow_id}`);
     } catch (err) {
       console.warn(`[recovery] payout failed for ${row.escrow_id}: ${err.message}`);

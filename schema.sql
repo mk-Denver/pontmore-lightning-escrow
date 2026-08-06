@@ -32,6 +32,7 @@ create table if not exists public.escrow_instances (
     release_decision_type      text,
     release_decision_payload   jsonb,
     payout_successful          boolean     not null default false,
+    payout_claimed_at          timestamptz,
     -- operator-layer dispute columns (PIP-03)
     dispute_class              text,
     dispute_opened_by          text,
@@ -55,6 +56,7 @@ create unique index if not exists idx_escrow_creator_idempotency
     where idempotency_key is not null;
 
 alter table public.escrow_instances alter column state set default 'created';
+alter table public.escrow_instances add column if not exists payout_claimed_at timestamptz;
 update public.escrow_instances set state = case state
     when 'CREATED' then 'created'
     when 'PENDING_FUNDING' then 'created'
@@ -213,6 +215,32 @@ begin
     returning *;
 end;
 $$;
+
+create or replace function public.claim_payout_attempt(
+    p_escrow_id uuid,
+    p_lease_seconds integer default 600
+) returns setof public.escrow_instances
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    now_ts timestamptz := now();
+    lease_cutoff timestamptz := now_ts - make_interval(secs => greatest(p_lease_seconds, 1));
+begin
+    return query
+    update public.escrow_instances
+       set payout_claimed_at = now_ts,
+           updated_at = now_ts
+     where escrow_id = p_escrow_id
+       and payout_successful = false
+       and (payout_claimed_at is null or payout_claimed_at < lease_cutoff)
+    returning *;
+end;
+$$;
+
+revoke all on function public.claim_payout_attempt(uuid, integer) from public, anon, authenticated;
+grant execute on function public.claim_payout_attempt(uuid, integer) to service_role;
 
 revoke all on function public.transition_escrow_state(uuid, text, text, jsonb) from public, anon, authenticated;
 grant execute on function public.transition_escrow_state(uuid, text, text, jsonb) to service_role;

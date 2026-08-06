@@ -500,6 +500,20 @@ async function setPayoutSuccessful(escrowId) {
 }
 
 /**
+ * Atomically claim an escrow payout before sending it.
+ * Returns the updated row when the claim succeeds, or null when another process already owns the claim.
+ */
+async function claimPayoutAttempt(escrowId, leaseSeconds = 600) {
+  const db = supabase();
+  const { data, error } = await db.rpc('claim_payout_attempt', {
+    p_escrow_id: escrowId,
+    p_lease_seconds: leaseSeconds,
+  });
+  if (error) throw new Error(`[supabase] claimPayoutAttempt failed for ${escrowId}: ${error.message}`);
+  return Array.isArray(data) && data.length > 0 ? data[0] : null;
+}
+
+/**
  * Fetch all released escrows whose payout has not been confirmed (recovery set).
  */
 async function getSettledUnpaidEscrows() {
@@ -592,6 +606,7 @@ module.exports = {
   transitionEscrowState,
   setReleaseDecision,
   setPayoutSuccessful,
+  claimPayoutAttempt,
   getSettledUnpaidEscrows,
   getExpiredPendingEscrows,
   listEscrowInstances,

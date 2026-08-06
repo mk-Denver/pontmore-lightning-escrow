@@ -217,7 +217,7 @@ async function getInvoiceStatus(paymentHash) {
 // Payouts
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function payToLightningAddress({ lnAddress, amountSats }) {
+async function payToLightningAddress({ lnAddress, amountSats, idempotencyKey }) {
   const walletId = await getBtcWalletId();
 
   if (!lnAddress || !lnAddress.includes('@')) {
@@ -226,6 +226,8 @@ async function payToLightningAddress({ lnAddress, amountSats }) {
 
   let data;
   try {
+    const input = { walletId, lnAddress, amount: amountSats };
+    if (idempotencyKey) input.idempotencyKey = idempotencyKey;
     data = await blinkRequest(`
       mutation LnAddressPaymentSend($input: LnAddressPaymentSendInput!) {
         lnAddressPaymentSend(input: $input) {
@@ -234,9 +236,7 @@ async function payToLightningAddress({ lnAddress, amountSats }) {
           errors { message }
         }
       }
-    `, {
-      input: { walletId, lnAddress, amount: amountSats },
-    });
+    `, { input });
   } catch (err) {
     throw new LnAddressPayoutError(lnAddress, err.message);
   }

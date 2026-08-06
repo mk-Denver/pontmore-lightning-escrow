@@ -370,7 +370,7 @@
       "partially_funded": "Canonical. At least one declared participant has funded, but the funding condition is not yet satisfied.",
       "active": "Canonical. The funding condition is satisfied; release and refund are reachable.",
       "release_pending": "Canonical. A release or refund request has been submitted and is awaiting an authorizing decision.",
-      "disputed": "Non-canonical operator-added intermediate state (per PIP-01). Reached from active or release_pending when the operator files a dispute. Holds custody while the operator resolves the dispute under PIP-03. Valid operations: fund_status (read), release, refund. funding_instructions and cancel are rejected. Does not relax terminal-state invariants: the only exits are released or refunded.",
+      "disputed": "Non-canonical operator-added intermediate state (per PIP-01). Reached from active or release_pending when the operator or bounded participant files a dispute. Holds custody while the operator resolves the dispute under PIP-03. Valid operations: fund_status (read), release, refund. funding_instructions and cancel are rejected. Does not relax terminal-state invariants: the only exits are released or refunded.",
       "released": "Canonical terminal. The escrowed amount has been released to the recipient.",
       "refunded": "Canonical terminal. The escrowed amount has been refunded to the funder(s).",
       "canceled": "Canonical terminal. The instance was canceled before becoming active; any partially funded amounts were refunded."
