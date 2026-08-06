@@ -544,7 +544,11 @@ async function listEscrowInstances({ state, limit, offset } = {}) {
 }
 
 async function fileDispute(escrowId, { disputeClass, summary, openedBy }) {
-  await transitionState(escrowId, 'active', 'disputed', {
+  const escrow = await getEscrowInstance(escrowId);
+  if (!['active', 'release_pending'].includes(escrow.state)) {
+    throw new ValidationError(`disputes can only be filed on an active or release_pending escrow; escrow is ${escrow.state}`);
+  }
+  await transitionState(escrowId, escrow.state, 'disputed', {
     dispute_class:   disputeClass,
     dispute_summary: summary ?? '',
     dispute_opened_by: openedBy,
