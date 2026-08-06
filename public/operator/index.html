@@ -31,11 +31,11 @@ th { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-
 tbody tr { cursor: pointer; transition: background 0.1s; }
 tbody tr:hover { background: var(--border); }
 .state-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; }
-.state-FUNDED { background: #1a3a2a; color: var(--green); }
-.state-SETTLED { background: #1a2a3a; color: #60a5fa; }
-.state-DISPUTED { background: #3a2a1a; color: var(--amber); }
-.state-CANCELLED { background: #3a1a1a; color: var(--red); }
-.state-CREATED, .state-PENDING_FUNDING { background: #1f1f2a; color: var(--muted); }
+.state-active { background: #1a3a2a; color: var(--green); }
+.state-released { background: #1a2a3a; color: #60a5fa; }
+.state-disputed { background: #3a2a1a; color: var(--amber); }
+.state-canceled, .state-refunded { background: #3a1a1a; color: var(--red); }
+.state-created, .state-partially_funded, .state-release_pending { background: #1f1f2a; color: var(--muted); }
 .detail-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-top: 20px; }
 .detail-panel h2 { font-size: 1.1rem; margin-bottom: 16px; }
 .field { display: flex; padding: 6px 0; border-bottom: 1px solid var(--border); }
@@ -82,12 +82,14 @@ code { background: #1f1f2a; padding: 1px 5px; border-radius: 3px; font-size: 0.8
 
 <div class="tabs" id="tabs">
   <div class="tab active" data-state="" onclick="setFilter('')">All</div>
-  <div class="tab" data-state="CREATED" onclick="setFilter('CREATED')">Created</div>
-  <div class="tab" data-state="PENDING_FUNDING" onclick="setFilter('PENDING_FUNDING')">Pending</div>
-  <div class="tab" data-state="FUNDED" onclick="setFilter('FUNDED')">Funded</div>
-  <div class="tab" data-state="DISPUTED" onclick="setFilter('DISPUTED')">Disputed</div>
-  <div class="tab" data-state="SETTLED" onclick="setFilter('SETTLED')">Settled</div>
-  <div class="tab" data-state="CANCELLED" onclick="setFilter('CANCELLED')">Cancelled</div>
+  <div class="tab" data-state="created" onclick="setFilter('created')">Created</div>
+  <div class="tab" data-state="partially_funded" onclick="setFilter('partially_funded')">Partial</div>
+  <div class="tab" data-state="active" onclick="setFilter('active')">Active</div>
+  <div class="tab" data-state="release_pending" onclick="setFilter('release_pending')">Release Pending</div>
+  <div class="tab" data-state="disputed" onclick="setFilter('disputed')">Disputed</div>
+  <div class="tab" data-state="released" onclick="setFilter('released')">Released</div>
+  <div class="tab" data-state="refunded" onclick="setFilter('refunded')">Refunded</div>
+  <div class="tab" data-state="canceled" onclick="setFilter('canceled')">Canceled</div>
   <div class="tab" data-mode="descriptor" onclick="showDescriptorTab()">Descriptor</div>
 </div>
 
@@ -460,8 +462,8 @@ ${r.dispute_class ? `
 ` : ''}
 
 <div class="actions">
-  ${r.state === 'FUNDED' ? `<button class="btn btn-danger" onclick="showDisputeForm('${r.escrow_id}')">File Dispute</button>` : ''}
-  ${r.state === 'DISPUTED' && !r.dispute_resolved_at ? `<button class="btn btn-primary" onclick="showResolveForm('${r.escrow_id}')">Resolve Dispute</button>` : ''}
+  ${['active','release_pending'].includes(r.state) ? `<button class="btn btn-danger" onclick="showDisputeForm('${r.escrow_id}')">File Dispute</button>` : ''}
+  ${r.state === 'disputed' && !r.dispute_resolved_at ? `<button class="btn btn-primary" onclick="showResolveForm('${r.escrow_id}')">Resolve Dispute</button>` : ''}
   <button class="btn" onclick="document.getElementById('detail-area').innerHTML=''; loadEscrows()">Close</button>
 </div>
 <div id="inline-form"></div>
