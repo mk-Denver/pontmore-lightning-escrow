@@ -134,6 +134,7 @@ All protected routes live under `SERVICE_PATH_PREFIX` (default `/pontmore/v1`) a
 | `POST` | `/pontmore/v1/release` | `escrow_id`, `release_decision`, `recipient`, `signatures`, `nonce`, `timestamp`, `result` | Release funds to the payee. |
 | `POST` | `/pontmore/v1/refund` | same as release | Refund funds to the funder(s). |
 | `POST` | `/pontmore/v1/cancel` | `escrow_id` | Cancel before funding, or after funding timeout with automatic partial refunds. |
+| `POST` | `/pontmore/v1/disputes` | `escrow_id`, `dispute_class`, `summary` | Raise a dispute. Caller must be a bound participant of the escrow (NIP-98 confirmed). Moves `active`/`release_pending` → `disputed`; the operator resolves under PIP-03. |
 
 ### Operator (NIP-98 + `OPERATOR_PUBKEY`)
 

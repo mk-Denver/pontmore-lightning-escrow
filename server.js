@@ -246,6 +246,20 @@ app.post(path.join(PREFIX, 'cancel'), requireBackend, requireNostrAuth, async (r
   }
 });
 
+app.post(path.join(PREFIX, 'disputes'), requireBackend, requireNostrAuth, async (req, res) => {
+  try {
+    const result = await escrow.fileDispute({
+      escrowId:      req.body.escrow_id,
+      authPubkey:    req.authPubkey,
+      disputeClass:  req.body.dispute_class,
+      summary:       req.body.summary,
+    });
+    res.json(result);
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Operator dashboard (NIP-98 + operator pubkey required)
 // ─────────────────────────────────────────────────────────────────────────────

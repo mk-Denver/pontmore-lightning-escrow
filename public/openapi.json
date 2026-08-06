@@ -162,6 +162,26 @@
       "CanonicalMessage": {
         "type": "string",
         "description": "The string each signer signs: pontmore-escrow:v1:<escrow_id>:<action>:<recipient>:<result_hash>:<nonce>:<timestamp>. The signature is BIP-340 Schnorr over sha256(canonical_message)."
+      },
+      "DisputeRequest": {
+        "type": "object",
+        "required": ["escrow_id", "dispute_class"],
+        "properties": {
+          "escrow_id": { "type": "string", "format": "uuid" },
+          "dispute_class": { "type": "string", "enum": ["payment_not_received", "payment_amount_mismatch", "payout_not_sent", "payout_amount_mismatch", "escrow_funding_failure", "conflicting_external_confirmations", "fraud_or_impersonation_risk", "timeout_and_abandonment"], "description": "PIP-03 dispute class." },
+          "summary": { "type": "string", "description": "Human-readable dispute summary; evidence should be exchanged privately per PIP-03 disclosure rules." }
+        }
+      },
+      "DisputeResponse": {
+        "type": "object",
+        "required": ["escrow_id", "state", "dispute_class", "dispute_opened_by", "dispute_opened_at"],
+        "properties": {
+          "escrow_id": { "type": "string", "format": "uuid" },
+          "state": { "type": "string", "enum": ["disputed"] },
+          "dispute_class": { "type": "string" },
+          "dispute_opened_by": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The bound participant pubkey that raised the dispute (identity confirmed via NIP-98)." },
+          "dispute_opened_at": { "type": "string", "format": "date-time" }
+        }
       }
     },
     "responses": {
@@ -321,9 +341,40 @@
           "409": { "$ref": "#/components/responses/Conflict" }
         }
       }
+    },
+    "/disputes": {
+      "post": {
+        "summary": "disputes",
+        "description": "Raise a dispute on an active or release_pending escrow. The authenticated Nostr pubkey (NIP-98) MUST be a bound participant of the escrow instance; identity is confirmed by the NIP-98 signature over the request URL and payload. Moves the instance to the non-canonical disputed state (documented in x-pontmore-state-machine). The operator resolves the dispute under PIP-03 via /operator/disputes/:id/resolve.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/DisputeRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Dispute filed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DisputeResponse" } } } },
+          "400": { "description": "Validation error (e.g. escrow not active/release_pending, or caller is not a bound participant)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
     }
   },
   "x-pontmore-state-machine": {
+    "states": {
+      "created": "Canonical. The escrow instance exists with its bound participant pubkeys; no side is funded yet.",
+      "partially_funded": "Canonical. At least one declared participant has funded, but the funding condition is not yet satisfied.",
+      "active": "Canonical. The funding condition is satisfied; release and refund are reachable.",
+      "release_pending": "Canonical. A release or refund request has been submitted and is awaiting an authorizing decision.",
+      "disputed": "Non-canonical operator-added intermediate state (per PIP-01). Reached from active or release_pending when the operator files a dispute. Holds custody while the operator resolves the dispute under PIP-03. Valid operations: fund_status (read), release, refund. funding_instructions and cancel are rejected. Does not relax terminal-state invariants: the only exits are released or refunded.",
+      "released": "Canonical terminal. The escrowed amount has been released to the recipient.",
+      "refunded": "Canonical terminal. The escrowed amount has been refunded to the funder(s).",
+      "canceled": "Canonical terminal. The instance was canceled before becoming active; any partially funded amounts were refunded."
+    },
     "transitions": {
       "created": ["created", "partially_funded", "active", "canceled"],
       "partially_funded": ["partially_funded", "active", "canceled"],
@@ -334,7 +385,23 @@
       "refunded": [],
       "canceled": []
     },
-    "terminal_states": ["released", "refunded", "canceled"]
+    "operations_by_state": {
+      "created": ["create", "funding_instructions", "fund_status", "cancel"],
+      "partially_funded": ["funding_instructions", "fund_status", "cancel"],
+      "active": ["funding_instructions", "fund_status", "release", "refund"],
+      "release_pending": ["funding_instructions", "fund_status", "release", "refund"],
+      "disputed": ["fund_status", "release", "refund"],
+      "released": ["fund_status"],
+      "refunded": ["fund_status"],
+      "canceled": ["fund_status"]
+    },
+    "terminal_states": ["released", "refunded", "canceled"],
+    "notes": [
+      "disputed is a non-canonical operator-added intermediate state, documented here as required by PIP-01. It does not relax the terminal-state invariants: once terminal, every mutating operation is rejected with a terminal-state error, and at most one terminal transition may succeed.",
+      "cancel is valid in partially_funded only after funding_deadline; funded sides are refunded before the terminal canceled transition.",
+      "fund_status remains valid as a read operation in every state, including terminal states.",
+      "This service does not implement a split operation; release and refund are the only terminal-triggering participant operations."
+    ]
   },
   "x-pontmore-idempotency": {
     "description": "The idempotency_key in create is a correlation value used to deduplicate retries. It MUST NOT authorize participant joining or bind any additional pubkeys. Repeated create calls with the same idempotency_key return the existing instance and do not create a second one.",

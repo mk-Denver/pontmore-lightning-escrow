@@ -215,7 +215,34 @@ curl -s -X POST https://standalone-escrow.onrender.com/pontmore/v1/cancel \
 
 ---
 
-## 8. Operator endpoints (require `OPERATOR_PUBKEY`)
+## 8. Raise a dispute (participant)
+
+A bound participant raises a dispute on an active or release_pending escrow.
+The `Authorization` header MUST be signed by a participant pubkey of the escrow
+(NIP-98 confirms the caller's identity).
+
+```bash
+curl -s -X POST https://standalone-escrow.onrender.com/pontmore/v1/disputes \
+  -H 'Authorization: Nostr <base64-signed-event>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "escrow_id": "<ESCROW_ID>",
+    "dispute_class": "payout_not_sent",
+    "summary": "Customer paid but no payout received"
+  }' | jq
+```
+
+Valid `dispute_class` values: `payment_not_received`, `payment_amount_mismatch`,
+`payout_not_sent`, `payout_amount_mismatch`, `escrow_funding_failure`,
+`conflicting_external_confirmations`, `fraud_or_impersonation_risk`,
+`timeout_and_abandonment`.
+
+The escrow moves to `disputed`. The operator then resolves it via
+`/operator/disputes/:id/resolve` (see section 9).
+
+---
+
+## 9. Operator endpoints (require `OPERATOR_PUBKEY`)
 
 ### List escrows
 ```bash
