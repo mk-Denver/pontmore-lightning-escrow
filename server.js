@@ -349,37 +349,44 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
       note,
     });
 
-    // Execute payout
-    const payoutSats = escrow.amount_sats;
+    const payouts = [];
     if (outcome === 'release') {
-      const addr = escrow.payout_ln_address;
-      if (addr && addr.includes('@')) {
-        try {
-          await claimAndSendLightningPayout({ escrowId, lnAddress: addr, amountSats: payoutSats });
-        } catch (err) {
-          return res.json({
-            escrow_id:        resolved.escrow_id,
-            state:            resolved.state,
-            payout:           { status: 'pending_bolt11', reason: err.message },
-            resolution_mode:  resolved.dispute_resolution_mode,
-            resolved_at:      resolved.dispute_resolved_at,
-          });
+      // Mirror lib/escrow.js address resolution: for multi-party, prefer the
+      // recipient funder's payout_ln_address, falling back to refund_ln_address.
+      let addr = escrow.payout_ln_address;
+      let recipientPubkey = escrow.counterparty_pubkey;
+      if (escrow.funding_model !== 'single_funder') {
+        const funders = await listFunders(escrowId);
+        const recipientFunder = funders.find((f) => f.funder_pubkey === escrow.counterparty_pubkey);
+        addr = recipientFunder?.payout_ln_address || recipientFunder?.refund_ln_address || addr;
+      } else if (recipientPubkey === escrow.creator_pubkey) {
+        addr = escrow.refund_ln_address;
+      }
+      payouts.push({ recipient_pubkey: recipientPubkey, sats: escrow.amount_sats, address: addr });
+    } else if (outcome === 'refund') {
+      // single_funder: full amount to the creator (funder).
+      if (escrow.funding_model === 'single_funder') {
+        payouts.push({ recipient_pubkey: escrow.creator_pubkey, sats: escrow.amount_sats, address: escrow.refund_ln_address });
+      } else {
+        // two_party / m_of_n: refund each funded funder their contribution.
+        const funders = await listFunders(escrowId);
+        for (const f of funders.filter((row) => row.funded)) {
+          payouts.push({ recipient_pubkey: f.funder_pubkey, sats: f.amount_sats, address: f.refund_ln_address });
         }
       }
-    } else if (outcome === 'refund') {
-      const addr = escrow.refund_ln_address;
-      if (addr && addr.includes('@')) {
-        try {
-          await claimAndSendLightningPayout({ escrowId, lnAddress: addr, amountSats: payoutSats });
-        } catch (err) {
-          return res.json({
-            escrow_id:        resolved.escrow_id,
-            state:            resolved.state,
-            refund:           { status: 'pending_bolt11', reason: err.message },
-            resolution_mode:  resolved.dispute_resolution_mode,
-            resolved_at:      resolved.dispute_resolved_at,
-          });
-        }
+    }
+
+    const payoutResults = [];
+    for (const p of payouts) {
+      if (!p.address || !p.address.includes('@')) {
+        payoutResults.push({ recipient_pubkey: p.recipient_pubkey, sats: p.sats, status: 'pending_bolt11', reason: 'no payout_ln_address on file' });
+        continue;
+      }
+      try {
+        await claimAndSendLightningPayout({ escrowId, lnAddress: p.address, amountSats: p.sats });
+        payoutResults.push({ recipient_pubkey: p.recipient_pubkey, sats: p.sats, status: 'sent' });
+      } catch (err) {
+        payoutResults.push({ recipient_pubkey: p.recipient_pubkey, sats: p.sats, status: 'pending_bolt11', reason: err.message });
       }
     }
 
@@ -389,6 +396,7 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
       resolution_mode:  resolved.dispute_resolution_mode,
       resolved_at:      resolved.dispute_resolved_at,
       payout_successful: resolved.payout_successful,
+      payouts:          payoutResults,
     });
   } catch (err) {
     handleError(res, err);
