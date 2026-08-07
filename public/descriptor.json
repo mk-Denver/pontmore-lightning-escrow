@@ -39,7 +39,7 @@
     "release_decisions": ["mutual_consent", "operator_decision", "application_signed_result"],
     "decision_signers": {
       "operator_pubkey": null,
-      "application_pubkeys": [],
+      "application_pubkeys": null,
       "oracle_pubkeys": []
     }
   },

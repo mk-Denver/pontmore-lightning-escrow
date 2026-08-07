@@ -124,7 +124,7 @@ app.get(path.join(config.SERVICE_PATH_PREFIX, 'descriptor'), (_req, res) => {
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
     descriptor.service.decision_signers = {
       operator_pubkey: config.OPERATOR_PUBKEY || null,
-      application_pubkeys: config.APPLICATION_SIGNER_PUBKEYS,
+      application_pubkeys: null,
       oracle_pubkeys: config.ORACLE_PUBKEYS,
     };
   }
@@ -436,7 +436,7 @@ app.get(path.join(PREFIX, 'operator', 'descriptor'), (_req, res) => {
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
     descriptor.service.decision_signers = {
       operator_pubkey: config.OPERATOR_PUBKEY || null,
-      application_pubkeys: config.APPLICATION_SIGNER_PUBKEYS,
+      application_pubkeys: null,
       oracle_pubkeys: config.ORACLE_PUBKEYS,
     };
   }

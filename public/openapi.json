@@ -439,7 +439,7 @@
       "mutual_consent": "Release or refund authorized by all declared participants.",
       "operator_decision": "Release or refund authorized by the escrow operator as arbiter.",
       "oracle_signature": "Release or refund authorized by a signature from a referenced oracle. The schema MUST name the referenced oracle explicitly and bind the decision to that oracle's public key.",
-      "application_signed_result": "Release or refund authorized by a signed result from the originating application. Signed payload MUST include escrow identifier and result identifier/hash; signatures are BIP-340 Schnorr.",
+      "application_signed_result": "Release or refund authorized by a signed result from the originating application. The application signer is identified by the signature entry and is not restricted to a preconfigured allowlist. Signed payload MUST include escrow identifier and result identifier/hash; signatures are BIP-340 Schnorr.",
       "threshold_participant_signatures": "Release or refund authorized by a threshold of participant signatures. Schema MUST define the threshold value and the location of the participant signatures."
     }
   },
