@@ -15,7 +15,7 @@
  * Requires OPERATOR_NSEC in .env.
  */
 
-const { schnorr } = require('@noble/curves/secp256k1');
+const { secp256k1, schnorr } = require('@noble/curves/secp256k1');
 const { sha256 } = require('@noble/hashes/sha256');
 const WebSocket = require('ws');
 const { config } = require('../config/env');
@@ -108,7 +108,7 @@ async function main() {
   }
 
   const privkeyHex = decodeNsec(config.OPERATOR_NSEC);
-  const pubkeyHex = hx(schnorr.getPublicKey(privkeyHex)).slice(2);
+  const pubkeyHex = hx(secp256k1.getPublicKey(privkeyHex)).slice(2);
 
   console.log('[list] Operator pubkey:', pubkeyHex);
   console.log('[list] Querying relays for kind 30361 events...');
