@@ -76,12 +76,13 @@ create table if not exists public.escrow_enrollments (
     escrow_id              uuid        not null references public.escrow_instances(escrow_id) on delete cascade,
     token_hash             text        not null unique,
     enrollment_token       text        not null,
-    participant_pubkey     text        not null,
+    participant_pubkey     text,
     redeemed_at            timestamptz,
     created_at             timestamptz not null default now(),
     unique (escrow_id, participant_pubkey)
 );
 alter table public.escrow_enrollments add column if not exists enrollment_token text;
+alter table public.escrow_enrollments alter column participant_pubkey drop not null;
 
 create table if not exists public.escrow_decision_nonces (
     escrow_id              uuid        not null references public.escrow_instances(escrow_id) on delete cascade,
@@ -173,7 +174,6 @@ declare
         array['active',           'disputed'],
         array['release_pending',  'released'],
         array['release_pending',  'refunded'],
-        array['release_pending',  'canceled'],
         array['release_pending',  'disputed'],
         array['disputed',         'released'],
         array['disputed',         'refunded']

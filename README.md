@@ -128,7 +128,7 @@ All protected routes live under `SERVICE_PATH_PREFIX` (default `/pontmore/v1`) a
 
 | Method | Path | Body | Description |
 | --- | --- | --- | --- |
-| `POST` | `/pontmore/v1/create` | New: `amount_sats`, `participant_pubkeys`, model fields. Join: `enrollment_token`. | Open an escrow or redeem a signer-bound enrollment. |
+| `POST` | `/pontmore/v1/create` | New: `amount_sats`, required `funding_model`, and M-of-N fields when applicable. Join: `enrollment_token`; the joining NIP-98 signer is bound at redemption. | Open an escrow or redeem an enrollment. |
 | `POST` | `/pontmore/v1/funding_instructions` | `escrow_id` | Return/create the Lightning invoice to fund. |
 | `POST` | `/pontmore/v1/fund_status` | `escrow_id` | Observe funding state (per-funder for multi-party). |
 | `POST` | `/pontmore/v1/release` | `escrow_id`, `release_decision`, `recipient`, `signatures`, `nonce`, `timestamp`, `result` | Release funds to the payee. |

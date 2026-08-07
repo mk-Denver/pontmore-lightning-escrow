@@ -88,24 +88,6 @@ const SERVICE_BASE_URL      = optionalUrl('SERVICE_BASE_URL', `http://localhost:
 const SERVICE_PATH_PREFIX   = optionalString('SERVICE_PATH_PREFIX', '/pontmore/v1');
 const SERVICE_INTERFACE     = optionalString('SERVICE_INTERFACE', 'pontmore_escrow_http_v1');
 const FUNDING_MODEL         = optionalString('FUNDING_MODEL', 'single_funder');
-const FUNDING_THRESHOLD     = (function () {
-  const raw = process.env.FUNDING_THRESHOLD;
-  if (!raw || raw.trim() === '') return null;
-  const v = Number(raw);
-  if (!Number.isInteger(v) || v < 1) {
-    throw new Error(`[config/env] FUNDING_THRESHOLD must be a positive integer or blank. Got: "${raw}"`);
-  }
-  return v;
-})();
-const PARTICIPANT_COUNT     = (function () {
-  const raw = process.env.PARTICIPANT_COUNT;
-  if (!raw || raw.trim() === '') return null;
-  const v = Number(raw);
-  if (!Number.isInteger(v) || v < 1) {
-    throw new Error(`[config/env] PARTICIPANT_COUNT must be a positive integer or blank. Got: "${raw}"`);
-  }
-  return v;
-})();
 const FIAT_CURRENCY         = optionalString('FIAT_CURRENCY', 'KES');
 const NIP98_MAX_AGE_SECONDS = Number(process.env.NIP98_MAX_AGE_SECONDS) || 60;
 const FUNDING_TIMEOUT_SECONDS = Number(process.env.FUNDING_TIMEOUT_SECONDS) || 86400;
@@ -145,13 +127,8 @@ if (!ACCEPTED_FUNDING_MODELS.includes(FUNDING_MODEL)) {
   throw new Error(`[config/env] FUNDING_MODEL ("${FUNDING_MODEL}") must be included in ACCEPTED_FUNDING_MODELS (${ACCEPTED_FUNDING_MODELS.join(', ')})`);
 }
 
-// m_of_n threshold/count are always client-defined on each create request (see
-// lib/escrow.js). FUNDING_THRESHOLD / PARTICIPANT_COUNT are NOT used as defaults
-// — they remain optional and are only advertised in the descriptor when set.
-// two_party always implies 2 participants / 2 required funders.
-if (FUNDING_THRESHOLD && PARTICIPANT_COUNT && FUNDING_THRESHOLD > PARTICIPANT_COUNT) {
-  throw new Error(`[config/env] FUNDING_THRESHOLD (${FUNDING_THRESHOLD}) cannot exceed PARTICIPANT_COUNT (${PARTICIPANT_COUNT})`);
-}
+// M and N are instance fields supplied by each m_of_n create request.
+// two_party always implies 2 participants and 2 required funders.
 
 const ACCEPTED_RELEASE_DECISIONS = (process.env.ACCEPTED_RELEASE_DECISIONS || 'mutual_consent,operator_decision,application_signed_result')
   .split(',')
@@ -197,8 +174,6 @@ const config = Object.freeze({
   SERVICE_INTERFACE,
   SCHEMA_URL,
   FUNDING_MODEL,
-  FUNDING_THRESHOLD,
-  PARTICIPANT_COUNT,
   ACCEPTED_FUNDING_MODELS,
   ACCEPTED_RELEASE_DECISIONS,
   APPLICATION_SIGNER_PUBKEYS,

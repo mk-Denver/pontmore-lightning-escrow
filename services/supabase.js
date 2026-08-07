@@ -66,7 +66,7 @@ const VALID_TRANSITIONS = Object.freeze({
   created:          ['created', 'partially_funded', 'active', 'canceled'],
   partially_funded: ['partially_funded', 'active', 'canceled'],
   active:           ['release_pending', 'released', 'refunded', 'disputed'],
-  release_pending:  ['released', 'refunded', 'canceled', 'disputed'],
+  release_pending:  ['released', 'refunded', 'disputed'],
   disputed:         ['released', 'refunded'],
   released:         [],
   refunded:         [],
@@ -140,26 +140,15 @@ async function createEscrowInstance({
   return data;
 }
 
-async function createEnrollment(escrowId, participantPubkey) {
+async function createEnrollment(escrowId) {
   const token = crypto.randomUUID().replace(/-/g, '');
   const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
   const { error } = await supabase().from('escrow_enrollments').insert({
     escrow_id: escrowId,
     token_hash: tokenHash,
     enrollment_token: token,
-    participant_pubkey: participantPubkey,
+    participant_pubkey: null,
   });
-  if (error?.code === '23505') {
-    const { data: existing, error: fetchError } = await supabase().from('escrow_enrollments')
-      .select('enrollment_token')
-      .eq('escrow_id', escrowId)
-      .eq('participant_pubkey', participantPubkey)
-      .maybeSingle();
-    if (fetchError || !existing?.enrollment_token) {
-      throw new Error(`[supabase] createEnrollment recovery failed: ${fetchError?.message || 'token unavailable'}`);
-    }
-    return existing.enrollment_token;
-  }
   if (error) throw new Error(`[supabase] createEnrollment failed: ${error.message}`);
   return token;
 }
@@ -171,32 +160,46 @@ async function listEnrollments(escrowId) {
   return data ?? [];
 }
 
-async function consumeEnrollment(token, participantPubkey) {
+async function claimEnrollment(token, participantPubkey) {
   const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
   const db = supabase();
-  const { data, error } = await db
+  const { data: enrollment, error: fetchError } = await db
     .from('escrow_enrollments')
     .select()
     .eq('token_hash', tokenHash)
-    .eq('participant_pubkey', participantPubkey)
     .is('redeemed_at', null)
     .maybeSingle();
-  if (error) throw new Error(`[supabase] consumeEnrollment failed: ${error.message}`);
-  if (!data) throw new ValidationError('invalid, already-used, or signer-mismatched enrollment token');
-  return getEscrowInstance(data.escrow_id);
+  if (fetchError) throw new Error(`[supabase] claimEnrollment lookup failed: ${fetchError.message}`);
+  if (!enrollment || (enrollment.participant_pubkey && enrollment.participant_pubkey !== participantPubkey)) {
+    throw new ValidationError('invalid, already-used, or signer-mismatched enrollment token');
+  }
+
+  const wasPrebound = Boolean(enrollment.participant_pubkey);
+  const redeemedAt = new Date().toISOString();
+  let update = db.from('escrow_enrollments')
+    .update({ participant_pubkey: participantPubkey, redeemed_at: redeemedAt })
+    .eq('token_hash', tokenHash)
+    .is('redeemed_at', null);
+  update = wasPrebound
+    ? update.eq('participant_pubkey', participantPubkey)
+    : update.is('participant_pubkey', null);
+  const { data, error } = await update.select().maybeSingle();
+  if (error) throw new Error(`[supabase] claimEnrollment failed: ${error.message}`);
+  if (!data) throw new ValidationError('invalid or already-used enrollment token');
+
+  return { escrow: await getEscrowInstance(data.escrow_id), tokenHash, participantPubkey, redeemedAt, wasPrebound };
 }
 
-async function redeemEnrollment(token, participantPubkey) {
-  const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
-  const { data, error } = await supabase().from('escrow_enrollments')
-    .update({ redeemed_at: new Date().toISOString() })
+async function releaseEnrollmentClaim({ tokenHash, participantPubkey, redeemedAt, wasPrebound }) {
+  const updates = wasPrebound
+    ? { redeemed_at: null }
+    : { participant_pubkey: null, redeemed_at: null };
+  const { error } = await supabase().from('escrow_enrollments')
+    .update(updates)
     .eq('token_hash', tokenHash)
     .eq('participant_pubkey', participantPubkey)
-    .is('redeemed_at', null)
-    .select()
-    .maybeSingle();
-  if (error) throw new Error(`[supabase] redeemEnrollment failed: ${error.message}`);
-  if (!data) throw new StateConflictError(data?.escrow_id ?? 'unknown', 'unredeemed enrollment');
+    .eq('redeemed_at', redeemedAt);
+  if (error) throw new Error(`[supabase] releaseEnrollmentClaim failed: ${error.message}`);
 }
 
 async function consumeDecisionNonce(escrowId, nonce) {
@@ -598,8 +601,8 @@ module.exports = {
   joinEscrowInstance,
   createEnrollment,
   listEnrollments,
-  consumeEnrollment,
-  redeemEnrollment,
+  claimEnrollment,
+  releaseEnrollmentClaim,
   consumeDecisionNonce,
   setFundingInvoice,
   transitionState,

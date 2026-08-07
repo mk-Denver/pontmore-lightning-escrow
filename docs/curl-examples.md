@@ -62,12 +62,13 @@ curl -s -X POST https://standalone-escrow.onrender.com/pontmore/v1/create \
   -H 'Content-Type: application/json' \
   -d '{
     "amount_sats": 1000,
+    "funding_model": "single_funder",
     "description": "Sale of digital goods #42",
     "refund_ln_address": "buyer@blink.sv"
   }' | jq
 ```
 
-Response includes `escrow_id`, `funding_deadline`, and signer-bound `enrollments`.
+Response includes `escrow_id`, `funding_deadline`, and opaque single-use `enrollments`. The creator does not need participant npubs; each participant is identified and bound by their NIP-98 signer when redeeming a token.
 
 ### Create with two_party model
 ```bash
@@ -76,12 +77,12 @@ Response includes `escrow_id`, `funding_deadline`, and signer-bound `enrollments
 
 ### Create with m_of_n (3 of 5)
 ```bash
-... -d '{"amount_sats":1000,"description":"group buy","funding_model":"m_of_n","funding_threshold":3,"participant_count":5,"participant_pubkeys":["<PUBKEY_B>","<PUBKEY_C>","<PUBKEY_D>","<PUBKEY_E>"]}'
+... -d '{"amount_sats":1000,"description":"group buy","funding_model":"m_of_n","funding_threshold":3,"participant_count":5}'
 ```
 
 ### Join an existing instance by invitation (counterparty)
 ```bash
-... -d '{"enrollment_token":"<BOUND_ENROLLMENT_TOKEN>","refund_ln_address":"seller@blink.sv"}'
+... -d '{"enrollment_token":"<ENROLLMENT_TOKEN>","refund_ln_address":"seller@blink.sv"}'
 ```
 
 ---

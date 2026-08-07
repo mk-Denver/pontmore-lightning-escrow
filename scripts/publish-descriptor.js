@@ -135,10 +135,12 @@ async function main() {
     descriptor.service.operations = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
     descriptor.service.auth       = ['nostr_http_auth'];
     descriptor.service.funding_model = config.ACCEPTED_FUNDING_MODELS;
-    descriptor.service.default_funding_model = config.FUNDING_MODEL;
-    descriptor.service.funding_threshold = config.FUNDING_THRESHOLD;
-    descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
+    descriptor.service.decision_signers = {
+      operator_pubkey: config.OPERATOR_PUBKEY || null,
+      application_pubkeys: config.APPLICATION_SIGNER_PUBKEYS,
+      oracle_pubkeys: config.ORACLE_PUBKEYS,
+    };
   }
   descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
   descriptor.updated_at = Math.floor(Date.now() / 1000);

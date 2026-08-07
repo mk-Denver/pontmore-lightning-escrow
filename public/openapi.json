@@ -3,7 +3,7 @@
   "info": {
     "title": "Pontmore Escrow HTTP Service",
     "version": "1.0.0",
-    "description": "Normative wire contract for pontmore_escrow_http_v1. Implements PIP-01 standalone service interface: create, funding_instructions, fund_status, release, refund, cancel. Authentication uses NIP-98 (nostr_http_auth)."
+    "description": "Normative wire contract for pontmore_escrow_http_v1. Implements PIP-01 standalone service interface: create, funding_instructions, fund_status, release, refund, cancel. Authentication uses NIP-98 (nostr_http_auth). For multi-party models, amount_sats is the principal contribution required from each participant; release pays the sum of funded contributions, excluding platform fees."
   },
   "servers": [
     { "url": "https://escrow.example.com/pontmore/v1" }
@@ -28,20 +28,30 @@
       "CreateRequest": {
         "type": "object",
         "properties": {
-          "amount_sats": { "type": "integer", "minimum": 1, "description": "Escrow amount in satoshis" },
+          "amount_sats": { "type": "integer", "minimum": 1, "description": "Principal contribution in satoshis. single_funder: the escrow principal; two_party/m_of_n: the contribution required from each participant." },
           "description": { "type": "string", "minLength": 1, "maxLength": 500 },
           "refund_ln_address": { "type": "string", "description": "Lightning Address for refund payout" },
           "idempotency_key": { "type": "string", "description": "Correlation value for request deduplication only; does not authorize participant joining" },
           "enrollment_token": { "type": "string", "description": "Single-use, signer-bound token for joining an existing escrow. Join requests require only this field." },
-          "participant_pubkeys": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "minItems": 1, "uniqueItems": true, "description": "Exact participant pubkeys authorized to enroll. One entry for single_funder/two_party; N-1 entries for m_of_n." },
-          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "m_of_n"], "description": "Per-instance funding model. Must be one of the descriptor service.funding_model values. Omit to use the deployment default." },
-          "funding_threshold": { "type": "integer", "minimum": 1, "description": "m_of_n only: M, the required funded participant count." },
-          "participant_count": { "type": "integer", "minimum": 2, "description": "m_of_n only: N, the total declared participant count." }
+          "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "m_of_n"], "description": "Required per-instance funding model. Must be one of the descriptor service.funding_model values." },
+          "funding_threshold": { "type": "integer", "minimum": 1, "description": "m_of_n only: M, the required funded participant count. Required when funding_model is m_of_n." },
+          "participant_count": { "type": "integer", "minimum": 2, "description": "m_of_n only: N, the total declared participant count. Required when funding_model is m_of_n." }
         },
         "oneOf": [
-          { "required": ["enrollment_token"] },
-          { "required": ["amount_sats", "participant_pubkeys"] }
-        ]
+          { "required": ["enrollment_token"], "not": { "required": ["amount_sats", "funding_model", "funding_threshold", "participant_count"] } },
+          {
+            "required": ["amount_sats", "funding_model"],
+            "if": { "required": ["funding_model"], "properties": { "funding_model": { "const": "m_of_n" } } },
+            "then": { "required": ["funding_threshold", "participant_count"] },
+            "else": {
+              "allOf": [
+                { "if": { "required": ["funding_model"], "properties": { "funding_model": { "const": "two_party" } } }, "then": { "not": { "anyOf": [{ "required": ["funding_threshold"] }, { "required": ["participant_count"] }] } } },
+                { "if": { "required": ["funding_model"], "properties": { "funding_model": { "const": "single_funder" } } }, "then": { "not": { "anyOf": [{ "required": ["funding_threshold"] }, { "required": ["participant_count"] }] } } }
+              ]
+            }
+          }
+        ],
+        "description": "The creator does not need to know participant public keys. The service issues one opaque enrollment token per future participant. A joining participant authenticates with NIP-98 and becomes bound to the token at redemption. For m_of_n, the service issues participant_count - 1 tokens; funding_threshold MUST be less than or equal to participant_count."
       },
       "CreateResponse": {
         "type": "object",
@@ -51,13 +61,13 @@
           "state": { "type": "string", "enum": ["created"] },
           "creator_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "counterparty_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true },
-          "amount_sats": { "type": "integer" },
+          "amount_sats": { "type": "integer", "description": "Principal contribution per participant for two_party/m_of_n; total principal for single_funder." },
           "platform_fee_sats": { "type": "integer" },
           "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "m_of_n"] },
           "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded participant count (m_of_n), or 2 for two_party" },
-          "participant_count": { "type": "integer", "nullable": true, "description": "Total declared participants (m_of_n)" },
+          "participant_count": { "type": "integer", "nullable": true, "description": "Total declared participants (m_of_n), or 2 for two_party" },
           "funding_deadline": { "type": "string", "format": "date-time" },
-          "enrollments": { "type": "array", "items": { "type": "object", "required": ["participant_pubkey", "enrollment_token"], "properties": { "participant_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "enrollment_token": { "type": "string" } } } }
+          "enrollments": { "type": "array", "items": { "type": "object", "required": ["enrollment_token"], "properties": { "enrollment_token": { "type": "string", "description": "Opaque, single-use token. The redeeming NIP-98 signer is bound to it at redemption." } } } }
         }
       },
       "JoinResponse": {
@@ -68,7 +78,7 @@
           "state": { "type": "string", "enum": ["created", "partially_funded", "active"] },
           "creator_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "counterparty_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-          "amount_sats": { "type": "integer" },
+          "amount_sats": { "type": "integer", "description": "Principal contribution per participant for two_party/m_of_n; total principal for single_funder." },
           "platform_fee_sats": { "type": "integer" },
           "funding_model": { "type": "string", "enum": ["single_funder", "two_party", "m_of_n"] },
           "funding_threshold": { "type": "integer", "nullable": true },
@@ -116,7 +126,7 @@
         "required": ["release_decision", "recipient", "nonce", "timestamp", "signatures"],
         "properties": {
           "release_decision": { "type": "string", "enum": ["mutual_consent", "operator_decision", "oracle_signature", "application_signed_result", "threshold_participant_signatures"] },
-          "recipient": { "type": "string", "enum": ["creator", "counterparty"], "description": "Which bound participant receives the release" },
+          "recipient": { "type": "string", "description": "Release recipient. Use creator or counterparty for single_funder/two_party. For m_of_n, use the 64-character hex pubkey of any bound participant. Refund uses creator because the service returns each funded contribution to its original funder.", "oneOf": [{ "enum": ["creator", "counterparty"] }, { "pattern": "^[0-9a-f]{64}$" }] },
           "nonce": { "type": "string", "description": "Unique per decision; replay protection" },
           "timestamp": { "type": "integer", "description": "Unix seconds" },
           "result": { "type": "object", "nullable": true, "description": "Verifiable result payload (required for application_signed_result)" },
@@ -134,8 +144,8 @@
         "properties": {
           "escrow_id": { "type": "string", "format": "uuid" },
           "state": { "type": "string", "enum": ["released"] },
-          "recipient": { "type": "string", "enum": ["creator", "counterparty"] },
-          "payout_sats": { "type": "integer" },
+          "recipient": { "type": "string", "description": "creator/counterparty role, or the selected bound participant pubkey for m_of_n" },
+          "payout_sats": { "type": "integer", "description": "Released principal. For multi-party models this is the sum of all funded participant contributions; platform fees are excluded." },
           "payout": { "type": "object" }
         }
       },
@@ -204,7 +214,7 @@
     "/create": {
       "post": {
         "summary": "create",
-        "description": "Open an escrow and bind the creator plus explicit participant_pubkeys. The response issues one signer-bound, single-use enrollment token per later participant. A join request supplies enrollment_token and must be signed by its bound participant. Idempotency is scoped to the authenticated creator and never authorizes enrollment.",
+        "description": "Open an escrow and bind the authenticated creator. No participant pubkeys are required at creation. The response issues one opaque, single-use enrollment token per future participant. A join request supplies enrollment_token and the authenticated NIP-98 signer becomes bound to that token and escrow. Idempotency is scoped to the authenticated creator and never authorizes enrollment.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateRequest" } } } },
         "responses": {
           "200": { "description": "Escrow instance created, or a participant enrolled", "content": { "application/json": { "schema": { "oneOf": [{ "$ref": "#/components/schemas/CreateResponse" }, { "$ref": "#/components/schemas/JoinResponse" }] } } } },
@@ -271,7 +281,7 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["escrow_id"],
+                "required": ["escrow_id", "decision"],
                 "properties": {
                   "escrow_id": { "type": "string", "format": "uuid" },
                   "decision": { "$ref": "#/components/schemas/ReleaseDecisionRequest" }
@@ -299,7 +309,7 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["escrow_id"],
+                "required": ["escrow_id", "decision"],
                 "properties": {
                   "escrow_id": { "type": "string", "format": "uuid" },
                   "decision": { "$ref": "#/components/schemas/ReleaseDecisionRequest" }
@@ -379,7 +389,7 @@
       "created": ["created", "partially_funded", "active", "canceled"],
       "partially_funded": ["partially_funded", "active", "canceled"],
       "active": ["release_pending", "released", "refunded", "disputed"],
-      "release_pending": ["released", "refunded", "canceled", "disputed"],
+      "release_pending": ["released", "refunded", "disputed"],
       "disputed": ["released", "refunded"],
       "released": [],
       "refunded": [],
@@ -404,20 +414,20 @@
     ]
   },
   "x-pontmore-idempotency": {
-    "description": "The idempotency_key in create is a correlation value used to deduplicate retries. It MUST NOT authorize participant joining or bind any additional pubkeys. Repeated create calls with the same idempotency_key return the existing instance and do not create a second one.",
+      "description": "The idempotency_key in create is scoped to the authenticated creator and deduplicates exact retries. It MUST NOT authorize participant joining. An exact retry returns the existing instance and any still-unredeemed enrollment tokens. Reusing the same key with a different amount, model, threshold, or participant count is rejected and does not mutate the existing instance.",
     "shared_correlation_field": "idempotency_key"
   },
   "x-pontmore-funding-model": {
     "single_funder": {
-      "description": "One participant (creator) funds the escrow. The declared counterparty joins with its signer-bound enrollment_token.",
+      "description": "One participant (creator) funds amount_sats as the total escrow principal. The counterparty joins with an opaque enrollment token and is bound by their NIP-98 signer at redemption.",
       "wire_fields": { "funding_threshold": "not used", "participant_count": "not used" }
     },
     "two_party": {
-      "description": "Two declared participants each fund a side. The instance becomes active only when both invoices are paid.",
+      "description": "Two declared participants each contribute amount_sats. The instance becomes active only when both invoices are paid, and release pays 2 * amount_sats as principal to the selected recipient.",
       "wire_fields": { "funding_threshold": "2 (implicit)", "participant_count": "2" }
     },
     "m_of_n": {
-      "description": "M of N declared participants must fund. The instance exposes funding_threshold (M) and participant_count (N). Every later participant receives a distinct signer-bound enrollment token. The instance becomes active at the threshold.",
+      "description": "M of N declared participants must each contribute amount_sats. The instance exposes funding_threshold (M) and participant_count (N). Creation returns N-1 distinct opaque enrollment tokens; each redeeming NIP-98 signer becomes a bound participant. The instance becomes active at the threshold, and release pays the sum of all funded contributions.",
       "wire_fields": { "funding_threshold": "M, minimum required funders", "participant_count": "N, total declared participants" }
     }
   },

@@ -35,7 +35,6 @@ const {
   getEscrowInstance,
   fileDispute,
   resolveDispute,
-  claimPayoutAttempt,
   setPayoutSuccessful,
   listFunders,
 } = require('./services/supabase');
@@ -47,19 +46,16 @@ const WebSocket = require('ws');
 
 const NOSTR_RELAYS = ['wss://nos.lol', 'wss://relay.damus.io'];
 
-function payoutIdempotencyKey(escrowId) {
-  return `escrow-payout:${escrowId}`;
+function payoutIdempotencyKey(escrowId, purpose, recipientPubkey) {
+  return `escrow-payout:${escrowId}:${purpose}:${recipientPubkey}`;
 }
 
-async function claimAndSendLightningPayout({ escrowId, lnAddress, amountSats }) {
-  const claimed = await claimPayoutAttempt(escrowId);
-  if (!claimed) return false;
+async function sendLightningPayout({ escrowId, purpose, recipientPubkey, lnAddress, amountSats }) {
   await blink.payToLightningAddress({
     lnAddress,
     amountSats,
-    idempotencyKey: payoutIdempotencyKey(escrowId),
+    idempotencyKey: payoutIdempotencyKey(escrowId, purpose, recipientPubkey),
   });
-  await setPayoutSuccessful(escrowId);
   return true;
 }
 
@@ -125,10 +121,12 @@ app.get(path.join(config.SERVICE_PATH_PREFIX, 'descriptor'), (_req, res) => {
     descriptor.service.operations = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
     descriptor.service.auth       = ['nostr_http_auth'];
     descriptor.service.funding_model     = config.ACCEPTED_FUNDING_MODELS;
-    descriptor.service.default_funding_model = config.FUNDING_MODEL;
-    descriptor.service.funding_threshold = config.FUNDING_THRESHOLD;
-    descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
+    descriptor.service.decision_signers = {
+      operator_pubkey: config.OPERATOR_PUBKEY || null,
+      application_pubkeys: config.APPLICATION_SIGNER_PUBKEYS,
+      oracle_pubkeys: config.ORACLE_PUBKEYS,
+    };
   }
   descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
   descriptor.updated_at = Math.floor(Date.now() / 1000);
@@ -359,10 +357,17 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
         const funders = await listFunders(escrowId);
         const recipientFunder = funders.find((f) => f.funder_pubkey === escrow.counterparty_pubkey);
         addr = recipientFunder?.payout_ln_address || recipientFunder?.refund_ln_address || addr;
+        payouts.push({
+          recipient_pubkey: recipientPubkey,
+          sats: funders.filter((f) => f.funded).reduce((sum, f) => sum + f.amount_sats, 0),
+          address: addr,
+        });
       } else if (recipientPubkey === escrow.creator_pubkey) {
         addr = escrow.refund_ln_address;
+        payouts.push({ recipient_pubkey: recipientPubkey, sats: escrow.amount_sats, address: addr });
+      } else {
+        payouts.push({ recipient_pubkey: recipientPubkey, sats: escrow.amount_sats, address: addr });
       }
-      payouts.push({ recipient_pubkey: recipientPubkey, sats: escrow.amount_sats, address: addr });
     } else if (outcome === 'refund') {
       // single_funder: full amount to the creator (funder).
       if (escrow.funding_model === 'single_funder') {
@@ -383,11 +388,20 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
         continue;
       }
       try {
-        await claimAndSendLightningPayout({ escrowId, lnAddress: p.address, amountSats: p.sats });
+        await sendLightningPayout({
+          escrowId,
+          purpose: outcome === 'release' ? 'release' : 'refund',
+          recipientPubkey: p.recipient_pubkey,
+          lnAddress: p.address,
+          amountSats: p.sats,
+        });
         payoutResults.push({ recipient_pubkey: p.recipient_pubkey, sats: p.sats, status: 'sent' });
       } catch (err) {
         payoutResults.push({ recipient_pubkey: p.recipient_pubkey, sats: p.sats, status: 'pending_bolt11', reason: err.message });
       }
+    }
+    if (payoutResults.length > 0 && payoutResults.every((result) => result.status === 'sent')) {
+      await setPayoutSuccessful(escrowId);
     }
 
     res.json({
@@ -419,10 +433,12 @@ app.get(path.join(PREFIX, 'operator', 'descriptor'), (_req, res) => {
     descriptor.service.operations        = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
     descriptor.service.auth              = ['nostr_http_auth'];
     descriptor.service.funding_model     = config.ACCEPTED_FUNDING_MODELS;
-    descriptor.service.default_funding_model = config.FUNDING_MODEL;
-    descriptor.service.funding_threshold = config.FUNDING_THRESHOLD;
-    descriptor.service.participant_count = config.PARTICIPANT_COUNT;
     descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
+    descriptor.service.decision_signers = {
+      operator_pubkey: config.OPERATOR_PUBKEY || null,
+      application_pubkeys: config.APPLICATION_SIGNER_PUBKEYS,
+      oracle_pubkeys: config.ORACLE_PUBKEYS,
+    };
   }
   descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
   descriptor.updated_at = Math.floor(Date.now() / 1000);
@@ -601,11 +617,29 @@ async function recoverPendingPayouts() {
   if (!pending.length) return console.log('[recovery] no pending payouts.');
 
   for (const row of pending) {
-    const payoutSats = row.amount_sats;
-    const addr = row.payout_ln_address;
+    const decision = row.release_decision_payload || {};
+    const recipient = decision.recipient || 'counterparty';
+    const recipientPubkey = /^[0-9a-f]{64}$/.test(recipient)
+      ? recipient
+      : recipient === 'creator'
+        ? row.creator_pubkey
+        : row.counterparty_pubkey;
+    const payoutSats = Number.isInteger(decision.payout_sats) ? decision.payout_sats : row.amount_sats;
+    let addr = recipient === 'creator' ? row.refund_ln_address : row.payout_ln_address;
+    if (row.funding_model !== 'single_funder') {
+      const recipientFunder = (await listFunders(row.escrow_id)).find((funder) => funder.funder_pubkey === recipientPubkey);
+      addr = recipientFunder?.payout_ln_address || recipientFunder?.refund_ln_address || addr;
+    }
     if (!addr) continue;
     try {
-      await claimAndSendLightningPayout({ escrowId: row.escrow_id, lnAddress: addr, amountSats: payoutSats });
+      await sendLightningPayout({
+        escrowId: row.escrow_id,
+        purpose: 'release',
+        recipientPubkey,
+        lnAddress: addr,
+        amountSats: payoutSats,
+      });
+      await setPayoutSuccessful(row.escrow_id);
       console.log(`[recovery] payout settled for ${row.escrow_id}`);
     } catch (err) {
       console.warn(`[recovery] payout failed for ${row.escrow_id}: ${err.message}`);

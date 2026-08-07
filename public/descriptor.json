@@ -36,9 +36,12 @@
     "auth": ["nostr_http_auth"],
     "operations": ["create", "funding_instructions", "fund_status", "release", "refund", "cancel"],
     "funding_model": ["single_funder", "two_party", "m_of_n"],
-    "funding_threshold": null,
-    "participant_count": null,
-    "release_decisions": ["mutual_consent", "operator_decision", "application_signed_result"]
+    "release_decisions": ["mutual_consent", "operator_decision", "application_signed_result"],
+    "decision_signers": {
+      "operator_pubkey": null,
+      "application_pubkeys": [],
+      "oracle_pubkeys": []
+    }
   },
   "updated_at": 1775559028
 }
