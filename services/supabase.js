@@ -97,7 +97,7 @@ async function createEscrowInstance({
   const db = supabase();
 
   // Idempotency: return a matching non-terminal escrow. Terminal escrows
-  // (released/refunded/canceled) do not block reuse of the same key.
+  // and escrows past their funding deadline do not block reuse of the key.
   if (idempotencyKey) {
     const { data: existing } = await db
       .from('escrow_instances')
@@ -105,6 +105,7 @@ async function createEscrowInstance({
       .eq('idempotency_key', idempotencyKey)
       .eq('creator_pubkey', creatorPubkey)
       .not('state', 'in', '(released,refunded,canceled)')
+      .gt('funding_deadline', new Date().toISOString())
       .maybeSingle();
     if (existing) return { ...existing, _idempotent: true };
   }
