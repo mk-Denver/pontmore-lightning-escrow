@@ -14,8 +14,10 @@ The service is discoverable on the Nostr network via signed `kind 30361` escrow 
   - `single_funder` — one invoice on the escrow row; the creator is the funder.
   - `two_party` — per-participant invoices in `escrow_funders`; funded only when both invoices are paid.
   - `m_of_n` — per-participant invoices; active once at least `funding_threshold` (M) of `participant_count` (N) funders have paid.
+- **Open enrollment** — `create` issues opaque single-use enrollment tokens; no pre-declared participant pubkeys required. The joining NIP-98 signer is bound to the token at redemption.
 - **Five release-decision formats** (configurable subset per deployment):
   `mutual_consent`, `operator_decision`, `oracle_signature`, `application_signed_result`, `threshold_participant_signatures`.
+  `application_signed_result` accepts any valid Schnorr signature (no preconfigured allowlist).
 - **Lightning custody via [Blink](https://blink.sv)** — invoice creation, payment status, and payouts to Lightning addresses / BOLT11.
 - **Durable storage via [Supabase](https://supabase.com)** — Postgres with an atomic state-transition RPC.
 - **Operator dashboard** — a static web UI plus protected endpoints to list escrows, file/resolve disputes, and publish/unpublish the descriptor.
@@ -38,6 +40,7 @@ services/
   blink.js                      Lightning invoice + payout integration
 scripts/
   publish-descriptor.js         Build, sign & broadcast the kind 30361 descriptor
+  list-descriptors.js           List published descriptor events; optionally delete them
   curl-auth.js                  Generate a curl command with a signed NIP-98 header
 public/
   descriptor.json               Static PIP-01 descriptor (rewritten at serve time)
@@ -52,12 +55,15 @@ schema.sql                      Postgres schema + transition_escrow_state RPC
 ```
 created ──► partially_funded ──► active ──► release_pending
    │                 │              │               │
-   └──► canceled ◄───┘              ├──► released ◄─┤
-                                    ├──► refunded ◄─┤
-                                    └──► disputed ──┘
+   └──► canceled ◄───┘              ├──► released    ├──► released
+                                    ├──► refunded    ├──► refunded
+                                    └──► disputed    └──► disputed
+                                          │
+                                          ├──► released
+                                          └──► refunded
 ```
 
-Transitions are enforced atomically by the `transition_escrow_state` Postgres RPC in `schema.sql`.
+Transitions are enforced atomically by the `transition_escrow_state` Postgres RPC in `schema.sql`. `release_pending` cannot transition to `canceled` — a valid signed refund decision is required once an escrow has been funded.
 
 ---
 
@@ -84,14 +90,14 @@ Key variables:
 | `PORT` | Express listen port (default `3000`). |
 | `SERVICE_BASE_URL` | Public base URL (no trailing slash). |
 | `SERVICE_PATH_PREFIX` | HTTP interface prefix (default `/pontmore/v1`). |
-| `FUNDING_MODEL` | Default funding model when a `create` omits it. |
+| `FUNDING_MODEL` | The deployment's primary funding model (legacy; `create` now requires an explicit `funding_model` field). |
 | `ACCEPTED_FUNDING_MODELS` | Comma-separated subset this deployment accepts. |
 | `ACCEPTED_RELEASE_DECISIONS` | Comma-separated subset of decision formats accepted. |
 | `FUNDING_TIMEOUT_SECONDS` | Maximum funding phase before partial sides may be canceled and refunded. |
 | `DECISION_MAX_AGE_SECONDS` | Maximum accepted release-decision age. |
 | `ORACLE_PUBKEYS` | Trusted oracle identities when `oracle_signature` is advertised. |
 | `OPERATOR_PUBKEY` / `OPERATOR_NSEC` | Operator Nostr identity (npub/hex and nsec). |
-| `APPLICATION_SIGNER_PUBKEYS` | Pubkeys authorized for `application_signed_result` decisions. |
+| `APPLICATION_SIGNER_PUBKEYS` | Legacy deployment metadata; `application_signed_result` accepts any valid signature, not only listed keys. |
 | `SUPABASE_PROJECT_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase backend. |
 | `BLINK_API_KEY` | Blink Lightning custody key. |
 | `PLATFORM_FEE_PERCENTAGE` | Decimal fee paid by the funder (e.g. `0.02` = 2%). |
@@ -165,8 +171,10 @@ Supported formats:
 - **`mutual_consent`** — signatures from all bound participants.
 - **`operator_decision`** — a signature from the configured `OPERATOR_PUBKEY`.
 - **`oracle_signature`** — a signature from an `oracle_pubkey` registered in `ORACLE_PUBKEYS`.
-- **`application_signed_result`** — a signature from a configured `APPLICATION_SIGNER_PUBKEYS` entry, bound to a `result` payload.
+- **`application_signed_result`** — a valid Schnorr signature over the canonical message with a non-empty `result` payload. Any hex pubkey is accepted (no preconfigured allowlist); the signer is recorded in the decision payload.
 - **`threshold_participant_signatures`** — at least `threshold` distinct participant signatures.
+
+The descriptor advertises a `decision_signers` block with `operator_pubkey`, `oracle_pubkeys`, and `application_pubkeys` (set to `null` — no allowlist).
 
 ---
 
@@ -184,6 +192,13 @@ Build, sign, and (optionally) broadcast the descriptor:
 node scripts/publish-descriptor.js            # print the signed event
 node scripts/publish-descriptor.js --publish   # broadcast to Nostr relays
 # or: npm run publish
+```
+
+List published descriptor events and optionally delete them:
+
+```bash
+node scripts/list-descriptors.js            # list event ids
+node scripts/list-descriptors.js --delete   # list + broadcast kind 5 deletion
 ```
 
 ---
