@@ -55,6 +55,13 @@ create unique index if not exists idx_escrow_creator_idempotency
     on public.escrow_instances (creator_pubkey, idempotency_key)
     where idempotency_key is not null;
 
+-- Allow idempotency key reuse after the original escrow is terminal.
+drop index if exists idx_escrow_creator_idempotency;
+create unique index idx_escrow_creator_idempotency
+    on public.escrow_instances (creator_pubkey, idempotency_key)
+    where idempotency_key is not null
+      and state not in ('released', 'refunded', 'canceled');
+
 alter table public.escrow_instances alter column state set default 'created';
 alter table public.escrow_instances add column if not exists payout_claimed_at timestamptz;
 update public.escrow_instances set state = case state
