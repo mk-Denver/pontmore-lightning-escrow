@@ -75,6 +75,7 @@ app.use((req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+  res.set('Cache-Control', 'no-store');
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
