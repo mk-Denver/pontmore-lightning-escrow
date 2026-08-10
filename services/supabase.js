@@ -164,7 +164,8 @@ async function listEnrollments(escrowId) {
 }
 
 async function claimEnrollment(token, participantPubkey) {
-  const tokenHash = require('crypto').createHash('sha256').update(token).digest('hex');
+  const cleanToken = token.trim();
+  const tokenHash = require('crypto').createHash('sha256').update(cleanToken).digest('hex');
   const db = supabase();
   const { data: enrollment, error: fetchError } = await db
     .from('escrow_enrollments')
@@ -190,7 +191,7 @@ async function claimEnrollment(token, participantPubkey) {
   if (error) throw new Error(`[supabase] claimEnrollment failed: ${error.message}`);
   if (!data) throw new ValidationError('invalid or already-used enrollment token');
 
-  return { escrow: await getEscrowInstance(data.escrow_id), tokenHash, participantPubkey, redeemedAt, wasPrebound };
+  return { escrowId: data.escrow_id, tokenHash, participantPubkey, redeemedAt, wasPrebound };
 }
 
 async function releaseEnrollmentClaim({ tokenHash, participantPubkey, redeemedAt, wasPrebound }) {
