@@ -268,7 +268,7 @@ async function joinEscrowInstance(escrowId, joinerPubkey, payoutLnAddress) {
       .eq('state', 'created')
       .is('counterparty_pubkey', null)
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) throw new Error(`[supabase] joinEscrowInstance failed: ${error.message}`);
     if (!data) throw new StateConflictError(escrowId, 'created');
@@ -322,7 +322,7 @@ async function joinEscrowInstance(escrowId, joinerPubkey, payoutLnAddress) {
       .eq('escrow_id', escrowId)
       .eq('state', 'created')
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) throw new Error(`[supabase] joinEscrowInstance (m_of_n) failed: ${error.message}`);
     if (!data) throw new StateConflictError(escrowId, 'created');

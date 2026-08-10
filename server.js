@@ -37,6 +37,7 @@ const {
   resolveDispute,
   setPayoutSuccessful,
   listFunders,
+  transitionState,
 } = require('./services/supabase');
 const blink = require('./services/blink');
 
@@ -418,6 +419,49 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
   }
 });
 
+// Cancel an expired or abandoned escrow. Only callable by the operator.
+// Refunds any funded contributions before canceling.
+app.post(path.join(PREFIX, 'operator', 'escrows', ':escrowId', 'cancel'), requireBackend, requireNostrAuth, requireOperator, async (req, res) => {
+  try {
+    const escrowId = req.params.escrowId;
+    const escrow = await getEscrowInstance(escrowId);
+
+    if (['released', 'refunded', 'canceled'].includes(escrow.state)) {
+      throw new ValidationError(`escrow is already terminal (${escrow.state})`);
+    }
+    if (['active', 'release_pending', 'disputed'].includes(escrow.state)) {
+      throw new ValidationError('cannot cancel an active escrow; use refund with a valid decision');
+    }
+
+    const refunds = [];
+    if (escrow.funding_model !== 'single_funder') {
+      const funders = await listFunders(escrowId);
+      for (const funder of funders.filter((row) => row.funded)) {
+        try {
+          await sendLightningPayout({
+            escrowId,
+            purpose: 'cancel-refund',
+            recipientPubkey: funder.funder_pubkey,
+            lnAddress: funder.refund_ln_address,
+            amountSats: funder.amount_sats,
+          });
+          refunds.push({ funder_pubkey: funder.funder_pubkey, refund_sats: funder.amount_sats, status: 'sent' });
+        } catch (err) {
+          refunds.push({ funder_pubkey: funder.funder_pubkey, refund_sats: funder.amount_sats, status: 'pending_bolt11', reason: err.message });
+        }
+      }
+    }
+    await transitionState(escrowId, escrow.state, 'canceled');
+    if (refunds.length > 0 && refunds.every((r) => r.status === 'sent')) {
+      await setPayoutSuccessful(escrowId);
+    }
+
+    res.json({ escrow_id: escrowId, state: 'canceled', refunds });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Descriptor management (operator only)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -599,8 +643,8 @@ function handleError(res, err) {
   if (err instanceof NotFoundError)      return res.status(404).json({ error: err.message });
   if (err instanceof StateConflictError) return res.status(409).json({ error: err.message });
   if (err instanceof ValidationError)    return res.status(400).json({ error: err.message });
-  console.error('[server] unhandled error:', err);
-  return res.status(500).json({ error: 'internal server error' });
+  console.error('[server] unhandled error:', err.message, err.stack);
+  return res.status(500).json({ error: err.message || 'internal server error' });
 }
 
 app.use((req, res) => res.status(404).json({ error: 'not found' }));

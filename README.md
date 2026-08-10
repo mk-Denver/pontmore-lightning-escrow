@@ -150,6 +150,7 @@ All protected routes live under `SERVICE_PATH_PREFIX` (default `/pontmore/v1`) a
 | `GET` | `/pontmore/v1/operator/escrows/:id` | Detail for one escrow (internal payment fields stripped). |
 | `POST` | `/pontmore/v1/operator/disputes` | File a dispute on an escrow. |
 | `POST` | `/pontmore/v1/operator/disputes/:id/resolve` | Resolve a dispute and execute the payout. |
+| `POST` | `/pontmore/v1/operator/escrows/:id/cancel` | Cancel an expired/abandoned escrow with automatic refunds. |
 | `GET` | `/pontmore/v1/operator/descriptor` | The served descriptor (operator view). |
 | `POST` | `/pontmore/v1/operator/publish` | Broadcast a signed `kind 30361` descriptor event to relays. |
 | `POST` | `/pontmore/v1/operator/unpublish` | Broadcast a `kind 5` deletion event for descriptor event ids. |
