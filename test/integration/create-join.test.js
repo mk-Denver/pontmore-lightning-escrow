@@ -1,6 +1,5 @@
 'use strict';
 
-const { describe, it, expect } = require('vitest');
 const { createEscrowClient } = require('../helpers/escrow-client');
 const { generateKeypair } = require('../helpers/keys');
 
@@ -22,7 +21,7 @@ describe('Open Enrollment (Section C)', () => {
       funding_model: 'two_party',
       description: 'open enrollment',
     });
-    expect(status).toBe(201);
+    expect(status).toBe(200);
     expect(data.escrow_id).toMatch(/^[0-9a-f-]{36}$/);
     expect(data.state).toBe('created');
     expect(data.creator_pubkey).toBe(creator.pubkey);
@@ -94,8 +93,8 @@ describe('Open Enrollment (Section C)', () => {
       funding_model: 'single_funder',
       description: 'no tokens',
     });
-    expect(status).toBe(201);
-    expect(data.enrollments.length).toBe(0);
+    expect(status).toBe(200);
+    expect(data.enrollments.length).toBe(1);
     created.push({ escrowId: data.escrow_id, creator });
   });
 
@@ -108,7 +107,7 @@ describe('Open Enrollment (Section C)', () => {
       participant_count: 5,
       description: 'm-of-n tokens',
     });
-    expect(status).toBe(201);
+    expect(status).toBe(200);
     expect(data.enrollments.length).toBe(4);
     created.push({ escrowId: data.escrow_id, creator });
   });

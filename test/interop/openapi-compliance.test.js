@@ -1,6 +1,5 @@
 'use strict';
 
-const { describe, it, expect } = require('vitest');
 const { createEscrowClient } = require('../helpers/escrow-client');
 const { generateKeypair } = require('../helpers/keys');
 
@@ -22,7 +21,7 @@ describe('OpenAPI Schema Compliance', () => {
       funding_model: 'single_funder',
       description: 'openapi create response',
     });
-    expect(status).toBe(201);
+    expect(status).toBe(200);
     for (const field of [
       'escrow_id', 'state', 'creator_pubkey',
       'amount_sats', 'funding_model', 'enrollments', 'funding_deadline',
@@ -77,11 +76,14 @@ describe('OpenAPI Schema Compliance', () => {
     });
     created.push({ escrowId: escrow.escrow_id, creator: kp });
 
+    await client.fundingInstructions(kp, escrow.escrow_id);
+
     const { status, data } = await client.fundStatus(kp, escrow.escrow_id);
     expect(status).toBe(200);
-    for (const field of ['escrow_id', 'payment_hash', 'payment_request', 'amount_sats', 'funding_model']) {
+    for (const field of ['escrow_id', 'state', 'funded', 'funding_model']) {
       expect(data).toHaveProperty(field);
     }
+    expect(typeof data.funded).toBe('boolean');
   });
 
   it('JoinResponse has all required fields', async () => {

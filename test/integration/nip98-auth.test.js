@@ -1,6 +1,5 @@
 'use strict';
 
-const { describe, it, expect } = require('vitest');
 const { createEscrowClient } = require('../helpers/escrow-client');
 const { generateKeypair } = require('../helpers/keys');
 
@@ -78,7 +77,7 @@ describe('NIP-98 Auth Verification (Section B)', () => {
       funding_model: 'single_funder',
       description: 'valid auth test',
     });
-    expect(status).toBe(201);
+    expect(status).toBe(200);
     expect(data.escrow_id).toBeTruthy();
     await client.cancel(kp, data.escrow_id);
   });

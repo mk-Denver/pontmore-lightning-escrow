@@ -1,6 +1,5 @@
 'use strict';
 
-const { describe, it, expect } = require('vitest');
 const { createEscrowClient } = require('../helpers/escrow-client');
 const { generateKeypair } = require('../helpers/keys');
 

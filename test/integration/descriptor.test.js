@@ -1,6 +1,5 @@
 'use strict';
 
-const { describe, it, expect } = require('vitest');
 const { createEscrowClient } = require('../helpers/escrow-client');
 
 const BASE_URL = process.env.SERVICE_BASE_URL || 'https://standalone-escrow.onrender.com';

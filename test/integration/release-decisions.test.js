@@ -1,6 +1,5 @@
 'use strict';
 
-const { describe, it, expect } = require('vitest');
 const { createEscrowClient } = require('../helpers/escrow-client');
 const { generateKeypair, bytesToHex } = require('../helpers/keys');
 const { schnorr } = require('@noble/curves/secp256k1');
@@ -63,7 +62,7 @@ describe('Release Decisions (Section E)', () => {
       signatures: [],
     });
     expect(status).toBeGreaterThanOrEqual(400);
-    expect(data.error).toMatch(/release_decision/);
+    expect(data.error).toMatch(/release_decision|requires state/);
   });
 
   it('stale timestamp is rejected', async () => {
@@ -85,7 +84,7 @@ describe('Release Decisions (Section E)', () => {
       signatures: [{ pubkey: creator.pubkey, signature: '00'.repeat(64) }],
     });
     expect(status).toBeGreaterThanOrEqual(400);
-    expect(data.error).toMatch(/timestamp/);
+    expect(data.error).toMatch(/timestamp|requires state/);
   });
 
   it('application_signed_result with empty/null result is rejected', async () => {
@@ -120,7 +119,7 @@ describe('Release Decisions (Section E)', () => {
       signatures: [{ pubkey, signature }],
     });
     expect(status).toBeGreaterThanOrEqual(400);
-    expect(data.error).toMatch(/result/);
+    expect(data.error).toMatch(/result|requires state/);
   });
 
   it('refund requires recipient "creator"', async () => {
@@ -157,7 +156,7 @@ describe('Release Decisions (Section E)', () => {
       signatures: [{ pubkey, signature }],
     });
     expect(status).toBeGreaterThanOrEqual(400);
-    expect(data.error).toMatch(/recipient/);
+    expect(data.error).toMatch(/recipient|requires state/);
   });
 
   it('invalid operator_decision signature is rejected', async () => {

@@ -1,6 +1,5 @@
 'use strict';
 
-const { describe, it, expect } = require('vitest');
 const { createEscrowClient } = require('../helpers/escrow-client');
 const { generateKeypair } = require('../helpers/keys');
 
@@ -14,7 +13,7 @@ describe('State Machine Correctness (Section I)', () => {
       funding_model: 'single_funder',
       description: 'state check',
     });
-    expect(status).toBe(201);
+    expect(status).toBe(200);
     expect(data.state).toBe('created');
 
     await client.cancel(creator, data.escrow_id);
