@@ -10,7 +10,9 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "build": "echo No build step required",
-    "publish": "node scripts/publish-descriptor.js --publish"
+    "publish": "node scripts/publish-descriptor.js --publish",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@noble/curves": "^1.6.0",
@@ -22,6 +24,7 @@
     "ws": "^8.21.1"
   },
   "devDependencies": {
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.6.1",
+    "vitest": "^2.1.9"
   }
 }
