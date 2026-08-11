@@ -126,22 +126,11 @@ async function main() {
   const descriptorPath = path.join(__dirname, '..', 'public', 'descriptor.json');
   const descriptor = JSON.parse(fs.readFileSync(descriptorPath, 'utf8'));
 
-  // Rewrite endpoint + schema_url from config (same as server.js does at serve time)
-  if (descriptor.service) {
-    descriptor.service.endpoint   = config.SERVICE_ENDPOINT;
-    descriptor.service.schema_url = config.SCHEMA_URL;
-    descriptor.service.transport  = ['https'];
-    descriptor.service.interface  = config.SERVICE_INTERFACE;
-    descriptor.service.operations = ['create', 'funding_instructions', 'fund_status', 'release', 'refund', 'cancel'];
-    descriptor.service.auth       = ['nostr_http_auth'];
-    descriptor.service.funding_model = config.ACCEPTED_FUNDING_MODELS;
-    descriptor.service.release_decisions = config.ACCEPTED_RELEASE_DECISIONS;
-    descriptor.service.decision_signers = {
-      operator_pubkey: config.OPERATOR_PUBKEY || null,
-      application_pubkeys: null,
-      oracle_pubkeys: config.ORACLE_PUBKEYS,
-    };
+  // Rewrite schema url from config (same as server.js does at serve time)
+  if (descriptor.service && descriptor.service.schema) {
+    descriptor.service.schema.url = config.SCHEMA_URL;
   }
+  descriptor.funding_rules.funding_model = config.ACCEPTED_FUNDING_MODELS;
   descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
   descriptor.updated_at = Math.floor(Date.now() / 1000);
 
@@ -156,8 +145,7 @@ async function main() {
   }
 
   console.log('[publish] Operator pubkey:', pubkeyHex);
-  console.log('[publish] Service endpoint:', descriptor.service.endpoint);
-  console.log('[publish] Schema URL:', descriptor.service.schema_url);
+  console.log('[publish] Schema URL:', config.SCHEMA_URL);
 
   const signedEvent = buildDescriptorEvent(descriptor, pubkeyHex, privkeyHex);
   console.log('[publish] Signed event id:', signedEvent.id);

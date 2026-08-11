@@ -2,13 +2,13 @@
 
 A [PIP-01](https://github.com/pontmore) conformant **custodial escrow service** over HTTPS for the Bitcoin Lightning Network. It holds sats in custody until a verifiable release/refund decision is reached, then pays out to a Lightning address. Identity and authorization are provided by Nostr (NIP-98 HTTP auth).
 
-The service is discoverable on the Nostr network via signed `kind 30361` escrow descriptor events, and on the [poc.pontmore.xyz](https://poc.pontmore.xyz) directory.
+The service is discoverable on the Nostr network via signed `kind 30361` escrow descriptor events per [PIP-01](https://github.com/pontmore/protocol) (compatibility/discovery object — service behavior is defined by the referenced `schema_url`).
 
 ---
 
 ## Features
 
-- **PIP-01 standalone service interface** — six canonical operations: `create`, `funding_instructions`, `fund_status`, `release`, `refund`, `cancel`.
+- **PIP-01 conformant descriptor** — the descriptor declares `escrow_type`, `networks`, `funding_rules`, `dispute_rules`, and a `service.schema` pointer; service behaviour is defined by the referenced OpenAPI schema.
 - **Nostr-native auth (NIP-98)** — every mutating request carries a signed `kind 27235` auth event; the authenticated Nostr pubkey *is* the participant identity.
 - **Three funding models**
   - `single_funder` — one invoice on the escrow row; the creator is the funder.
@@ -127,7 +127,7 @@ All protected routes live under `SERVICE_PATH_PREFIX` (default `/pontmore/v1`) a
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness + backend status. |
-| `GET` | `/pontmore/v1/descriptor` | The PIP-01 escrow descriptor (service block rewritten live). |
+| `GET` | `/pontmore/v1/descriptor` | The PIP-01 escrow descriptor (`service.schema.url` rewritten live). |
 | `GET` | `/pontmore/v1/openapi/v1.0.0.json` | The immutable normative wire contract (`schema_url`). |
 
 ### Protected (NIP-98)
@@ -175,7 +175,7 @@ Supported formats:
 - **`application_signed_result`** — a valid Schnorr signature over the canonical message with a non-empty `result` payload. Any hex pubkey is accepted (no preconfigured allowlist); the signer is recorded in the decision payload.
 - **`threshold_participant_signatures`** — at least `threshold` distinct participant signatures.
 
-The descriptor advertises a `decision_signers` block with `operator_pubkey`, `oracle_pubkeys`, and `application_pubkeys` (set to `null` — no allowlist).
+The descriptor advertises a `service.schema` pointer to the normative wire contract. Release, refund, and state-transition details are defined by the referenced OpenAPI schema, not repeated in the descriptor.
 
 ---
 
