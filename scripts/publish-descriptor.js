@@ -130,7 +130,8 @@ async function main() {
   if (descriptor.service && descriptor.service.schema) {
     descriptor.service.schema.url = config.SCHEMA_URL;
   }
-  descriptor.funding_rules.funding_model = config.ACCEPTED_FUNDING_MODELS;
+  descriptor.funding_rules.funding_threshold = 1;
+  descriptor.funding_rules.participant_count = config.MAX_PARTICIPANT_COUNT;
   descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
   descriptor.updated_at = Math.floor(Date.now() / 1000);
 

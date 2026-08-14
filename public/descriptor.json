@@ -3,7 +3,8 @@
   "escrow_type": "custodial_escrow",
   "networks": ["lightning"],
   "funding_rules": {
-    "funding_model": ["m_of_n"],
+    "funding_threshold": 1,
+    "participant_count": 2,
     "required_confirmation": "invoice_paid",
     "funding_timeout": "24_hours"
   },
