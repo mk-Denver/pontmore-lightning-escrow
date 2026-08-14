@@ -100,6 +100,13 @@ if (!Number.isInteger(DECISION_MAX_AGE_SECONDS) || DECISION_MAX_AGE_SECONDS < 1)
   throw new Error('[config/env] DECISION_MAX_AGE_SECONDS must be a positive integer');
 }
 
+// Safety cap on the client-specified m_of_n cardinality. M and N are chosen by
+// the client on each create request; this only bounds the maximum N accepted.
+const MAX_PARTICIPANT_COUNT = Number(process.env.MAX_PARTICIPANT_COUNT) || 2;
+if (!Number.isInteger(MAX_PARTICIPANT_COUNT) || MAX_PARTICIPANT_COUNT < 2) {
+  throw new Error('[config/env] MAX_PARTICIPANT_COUNT must be an integer >= 2');
+}
+
 const VALID_FUNDING_MODELS = new Set(['single_funder', 'two_party', 'm_of_n']);
 const VALID_RELEASE_DECISIONS = new Set([
   'mutual_consent', 'operator_decision', 'oracle_signature',
@@ -183,6 +190,7 @@ const config = Object.freeze({
   NIP98_MAX_AGE_SECONDS,
   FUNDING_TIMEOUT_SECONDS,
   DECISION_MAX_AGE_SECONDS,
+  MAX_PARTICIPANT_COUNT,
   FIAT_CURRENCY,
 
   // Backend (may be blank until deployment)

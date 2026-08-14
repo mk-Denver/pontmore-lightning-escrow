@@ -3,44 +3,20 @@
   "escrow_type": "custodial_escrow",
   "networks": ["lightning"],
   "funding_rules": {
+    "funding_threshold": 1,
+    "participant_count": 2,
     "required_confirmation": "invoice_paid",
-    "funding_timeout": "24_hours",
-    "funding_timeout_resolution": "cancel_and_refund_funded_sides"
-  },
-  "release_rules": {
-    "release_trigger": "application_signed_result",
-    "refund_trigger": "timeout_or_dispute_refund_decision",
-    "timeout_fallback": "operator_decision"
+    "funding_timeout": "24_hours"
   },
   "dispute_rules": {
-    "policy": "operator_resolved"
+    "policy": "operator_resolved",
+    "timeout_fallback": "operator_decision"
   },
   "reference_format": "bolt11_or_custodial_escrow_reference",
-  "custody_authority": "escrow_operator",
-  "release_authority": "escrow_operator",
-  "refund_authority": "escrow_operator",
-  "implementations": [
-    {
-      "network": "lightning",
-      "invoice_asset": "BTC",
-      "invoice_currency": "sats",
-      "invoice_amount_rule": "exact",
-      "payout_network": "lightning"
-    }
-  ],
   "service": {
-    "transport": ["https"],
-    "interface": "pontmore_escrow_http_v1",
-    "endpoint": "https://escrow.example.com/pontmore/v1",
-    "schema_url": "https://escrow.example.com/pontmore/v1/openapi/v1.0.0.json",
-    "auth": ["nostr_http_auth"],
-    "operations": ["create", "funding_instructions", "fund_status", "release", "refund", "cancel"],
-    "funding_model": ["single_funder", "two_party", "m_of_n"],
-    "release_decisions": ["mutual_consent", "operator_decision", "application_signed_result"],
-    "decision_signers": {
-      "operator_pubkey": null,
-      "application_pubkeys": null,
-      "oracle_pubkeys": []
+    "schema": {
+      "type": "openapi",
+      "url": "https://escrow.example.com/pontmore/v1/openapi/v1.0.0.json"
     }
   },
   "updated_at": 1775559028
