@@ -55,7 +55,6 @@ async function sendLightningPayout({ escrowId, purpose, recipientPubkey, lnAddre
   await blink.payToLightningAddress({
     lnAddress,
     amountSats,
-    idempotencyKey: payoutIdempotencyKey(escrowId, purpose, recipientPubkey),
   });
   return true;
 }
