@@ -12,7 +12,7 @@
 create table if not exists public.escrow_instances (
     escrow_id                  uuid        primary key default gen_random_uuid(),
     state                      text        not null default 'created',
-    funding_model              text        not null default 'single_funder',
+    funding_model              text        not null default '2_of_2',
     funding_threshold          integer     check (funding_threshold is null or funding_threshold >= 1),
     participant_count          integer     check (participant_count is null or participant_count >= 1),
     funding_deadline           timestamptz not null default (now() + interval '24 hours'),
@@ -74,6 +74,22 @@ update public.escrow_instances set state = case state
     else state
 end;
 update public.escrow_instances set funding_model = 'm_of_n' where funding_model = 'n_of_m';
+-- Migrate legacy funding models to the two-party 1_of_2 / 2_of_2 set (PIP-01).
+update public.escrow_instances
+   set participant_count = 2,
+       funding_model = case funding_model
+           when 'two_party'      then '2_of_2'
+           when 'single_funder'  then '1_of_2'
+           when 'm_of_n'         then case when funding_threshold >= 2 then '2_of_2' else '1_of_2' end
+           else funding_model
+       end;
+update public.escrow_instances
+   set funding_threshold = case funding_model when '2_of_2' then 2 else 1 end
+ where funding_threshold is null or funding_threshold not in (1, 2);
+alter table public.escrow_instances drop constraint if exists escrow_instances_funding_model_check;
+alter table public.escrow_instances
+    add constraint escrow_instances_funding_model_check
+    check (funding_model in ('1_of_2', '2_of_2'));
 update public.escrow_instances
 set funding_deadline = coalesce(funding_deadline, created_at + interval '24 hours');
 alter table public.escrow_instances alter column funding_deadline set not null;
@@ -109,9 +125,9 @@ end;
 $$;
 
 -- ============================================================================
--- escrow_funders: per-funder contributions for two_party and m_of_n models.
--- In single_funder the single invoice stays on escrow_instances.
--- Each funder row tracks an individual BOLT11 invoice and payment status.
+-- escrow_funders: per-funder contributions for the two-party funding models
+-- (1_of_2 / 2_of_2). Each funder row tracks an individual BOLT11 invoice and
+-- payment status.
 -- ============================================================================
 create table if not exists public.escrow_funders (
     funder_id              uuid        primary key default gen_random_uuid(),

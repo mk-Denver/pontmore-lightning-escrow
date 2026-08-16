@@ -87,7 +87,6 @@ const PORT                  = Number(process.env.PORT) || 3000;
 const SERVICE_BASE_URL      = optionalUrl('SERVICE_BASE_URL', `http://localhost:${PORT}`);
 const SERVICE_PATH_PREFIX   = optionalString('SERVICE_PATH_PREFIX', '/pontmore/v1');
 const SERVICE_INTERFACE     = optionalString('SERVICE_INTERFACE', 'pontmore_escrow_http_v1');
-const FUNDING_MODEL         = optionalString('FUNDING_MODEL', 'single_funder');
 const FIAT_CURRENCY         = optionalString('FIAT_CURRENCY', 'KES');
 const NIP98_MAX_AGE_SECONDS = Number(process.env.NIP98_MAX_AGE_SECONDS) || 60;
 const FUNDING_TIMEOUT_SECONDS = Number(process.env.FUNDING_TIMEOUT_SECONDS) || 86400;
@@ -100,27 +99,19 @@ if (!Number.isInteger(DECISION_MAX_AGE_SECONDS) || DECISION_MAX_AGE_SECONDS < 1)
   throw new Error('[config/env] DECISION_MAX_AGE_SECONDS must be a positive integer');
 }
 
-// Safety cap on the client-specified m_of_n cardinality. M and N are chosen by
-// the client on each create request; this only bounds the maximum N accepted.
-const MAX_PARTICIPANT_COUNT = Number(process.env.MAX_PARTICIPANT_COUNT) || 2;
-if (!Number.isInteger(MAX_PARTICIPANT_COUNT) || MAX_PARTICIPANT_COUNT < 2) {
-  throw new Error('[config/env] MAX_PARTICIPANT_COUNT must be an integer >= 2');
-}
+// Every escrow is two-party: exactly two declared funding participants (creator + counterparty).
+const PARTICIPANT_COUNT = 2;
 
-const VALID_FUNDING_MODELS = new Set(['single_funder', 'two_party', 'm_of_n']);
+const VALID_FUNDING_MODELS = new Set(['1_of_2', '2_of_2']);
 const VALID_RELEASE_DECISIONS = new Set([
   'mutual_consent', 'operator_decision', 'oracle_signature',
   'application_signed_result', 'threshold_participant_signatures',
 ]);
 
-if (!VALID_FUNDING_MODELS.has(FUNDING_MODEL)) {
-  throw new Error(`[config/env] FUNDING_MODEL must be one of: ${[...VALID_FUNDING_MODELS].join(', ')}. Got: "${FUNDING_MODEL}"`);
-}
-
 // Comma-separated list of funding models this deployment accepts on create.
-// Defaults to all three. FUNDING_MODEL becomes the default when create omits
-// an explicit funding_model.
-const ACCEPTED_FUNDING_MODELS = (process.env.ACCEPTED_FUNDING_MODELS || 'single_funder,two_party,m_of_n')
+// PIP-01 limits this escrow to two-party funding: 1_of_2 (one of two declared
+// funders must fund) and 2_of_2 (both declared funders must fund).
+const ACCEPTED_FUNDING_MODELS = (process.env.ACCEPTED_FUNDING_MODELS || '1_of_2,2_of_2')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
@@ -130,12 +121,6 @@ for (const fm of ACCEPTED_FUNDING_MODELS) {
     throw new Error(`[config/env] ACCEPTED_FUNDING_MODELS contains invalid value "${fm}". Valid: ${[...VALID_FUNDING_MODELS].join(', ')}`);
   }
 }
-if (!ACCEPTED_FUNDING_MODELS.includes(FUNDING_MODEL)) {
-  throw new Error(`[config/env] FUNDING_MODEL ("${FUNDING_MODEL}") must be included in ACCEPTED_FUNDING_MODELS (${ACCEPTED_FUNDING_MODELS.join(', ')})`);
-}
-
-// M and N are instance fields supplied by each m_of_n create request.
-// two_party always implies 2 participants and 2 required funders.
 
 const ACCEPTED_RELEASE_DECISIONS = (process.env.ACCEPTED_RELEASE_DECISIONS || 'mutual_consent,operator_decision,application_signed_result')
   .split(',')
@@ -180,7 +165,7 @@ const config = Object.freeze({
   SERVICE_ENDPOINT,
   SERVICE_INTERFACE,
   SCHEMA_URL,
-  FUNDING_MODEL,
+  PARTICIPANT_COUNT,
   ACCEPTED_FUNDING_MODELS,
   ACCEPTED_RELEASE_DECISIONS,
   APPLICATION_SIGNER_PUBKEYS,
@@ -190,7 +175,6 @@ const config = Object.freeze({
   NIP98_MAX_AGE_SECONDS,
   FUNDING_TIMEOUT_SECONDS,
   DECISION_MAX_AGE_SECONDS,
-  MAX_PARTICIPANT_COUNT,
   FIAT_CURRENCY,
 
   // Backend (may be blank until deployment)

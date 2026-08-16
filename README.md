@@ -10,10 +10,9 @@ The service is discoverable on the Nostr network via signed `kind 30361` escrow 
 
 - **PIP-01 conformant descriptor** — the descriptor declares `escrow_type`, `networks`, `funding_rules`, `dispute_rules`, and a `service.schema` pointer; service behaviour is defined by the referenced OpenAPI schema.
 - **Nostr-native auth (NIP-98)** — every mutating request carries a signed `kind 27235` auth event; the authenticated Nostr pubkey *is* the participant identity.
-- **Three funding models**
-  - `single_funder` — one invoice on the escrow row; the creator is the funder.
-  - `two_party` — per-participant invoices in `escrow_funders`; funded only when both invoices are paid.
-  - `m_of_n` — per-participant invoices; active once at least `funding_threshold` (M) of `participant_count` (N) funders have paid.
+- **Two two-party funding models** (PIP-01 `m of n` with `n = 2`)
+  - `1_of_2` — one of the two declared funders must fund; the escrow activates on either payment.
+  - `2_of_2` — both declared funders must fund; the escrow activates only when both invoices are paid.
 - **Open enrollment** — `create` issues opaque single-use enrollment tokens; no pre-declared participant pubkeys required. The joining NIP-98 signer is bound to the token at redemption.
 - **Five release-decision formats** (configurable subset per deployment):
   `mutual_consent`, `operator_decision`, `oracle_signature`, `application_signed_result`, `threshold_participant_signatures`.
@@ -90,8 +89,7 @@ Key variables:
 | `PORT` | Express listen port (default `3000`). |
 | `SERVICE_BASE_URL` | Public base URL (no trailing slash). |
 | `SERVICE_PATH_PREFIX` | HTTP interface prefix (default `/pontmore/v1`). |
-| `FUNDING_MODEL` | The deployment's primary funding model (legacy; `create` now requires an explicit `funding_model` field). |
-| `ACCEPTED_FUNDING_MODELS` | Comma-separated subset this deployment accepts. |
+| `ACCEPTED_FUNDING_MODELS` | Comma-separated subset of `1_of_2`, `2_of_2` this deployment accepts. |
 | `ACCEPTED_RELEASE_DECISIONS` | Comma-separated subset of decision formats accepted. |
 | `FUNDING_TIMEOUT_SECONDS` | Maximum funding phase before partial sides may be canceled and refunded. |
 | `DECISION_MAX_AGE_SECONDS` | Maximum accepted release-decision age. |
@@ -134,7 +132,7 @@ All protected routes live under `SERVICE_PATH_PREFIX` (default `/pontmore/v1`) a
 
 | Method | Path | Body | Description |
 | --- | --- | --- | --- |
-| `POST` | `/pontmore/v1/create` | New: `amount_sats`, required `funding_model`, and M-of-N fields when applicable. Join: `enrollment_token`; the joining NIP-98 signer is bound at redemption. | Open an escrow or redeem an enrollment. |
+| `POST` | `/pontmore/v1/create` | New: `amount_sats`, required `funding_model` (`1_of_2` or `2_of_2`). Join: `enrollment_token`; the joining NIP-98 signer is bound at redemption. | Open an escrow or redeem an enrollment. |
 | `POST` | `/pontmore/v1/funding_instructions` | `escrow_id` | Return/create the Lightning invoice to fund. |
 | `POST` | `/pontmore/v1/fund_status` | `escrow_id` | Observe funding state (per-funder for multi-party). |
 | `POST` | `/pontmore/v1/release` | `escrow_id`, `release_decision`, `recipient`, `signatures`, `nonce`, `timestamp`, `result` | Release funds to the payee. |

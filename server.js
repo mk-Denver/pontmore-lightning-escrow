@@ -117,8 +117,6 @@ app.get(path.join(config.SERVICE_PATH_PREFIX, 'descriptor'), (_req, res) => {
   if (descriptor.service && descriptor.service.schema) {
     descriptor.service.schema.url = config.SCHEMA_URL;
   }
-  descriptor.funding_rules.funding_threshold = 1;
-  descriptor.funding_rules.participant_count = config.MAX_PARTICIPANT_COUNT;
   descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
   descriptor.updated_at = Math.floor(Date.now() / 1000);
   res.json(descriptor);
@@ -340,35 +338,20 @@ app.post(path.join(PREFIX, 'operator', 'disputes', ':escrowId', 'resolve'), requ
 
     const payouts = [];
     if (outcome === 'release') {
-      // Mirror lib/escrow.js address resolution: for multi-party, prefer the
-      // recipient funder's payout_ln_address, falling back to refund_ln_address.
-      let addr = escrow.payout_ln_address;
-      let recipientPubkey = escrow.counterparty_pubkey;
-      if (escrow.funding_model !== 'single_funder') {
-        const funders = await listFunders(escrowId);
-        const recipientFunder = funders.find((f) => f.funder_pubkey === escrow.counterparty_pubkey);
-        addr = recipientFunder?.payout_ln_address || recipientFunder?.refund_ln_address || addr;
-        payouts.push({
-          recipient_pubkey: recipientPubkey,
-          sats: funders.filter((f) => f.funded).reduce((sum, f) => sum + f.amount_sats, 0),
-          address: addr,
-        });
-      } else if (recipientPubkey === escrow.creator_pubkey) {
-        addr = escrow.refund_ln_address;
-        payouts.push({ recipient_pubkey: recipientPubkey, sats: escrow.amount_sats, address: addr });
-      } else {
-        payouts.push({ recipient_pubkey: recipientPubkey, sats: escrow.amount_sats, address: addr });
-      }
+      // Prefer the recipient funder's payout_ln_address from escrow_funders.
+      const funders = await listFunders(escrowId);
+      const recipientPubkey = escrow.counterparty_pubkey;
+      const recipientFunder = funders.find((f) => f.funder_pubkey === recipientPubkey);
+      const addr = recipientFunder?.payout_ln_address || recipientFunder?.refund_ln_address || escrow.payout_ln_address;
+      payouts.push({
+        recipient_pubkey: recipientPubkey,
+        sats: funders.filter((f) => f.funded).reduce((sum, f) => sum + f.amount_sats, 0),
+        address: addr,
+      });
     } else if (outcome === 'refund') {
-      // single_funder: full amount to the creator (funder).
-      if (escrow.funding_model === 'single_funder') {
-        payouts.push({ recipient_pubkey: escrow.creator_pubkey, sats: escrow.amount_sats, address: escrow.refund_ln_address });
-      } else {
-        // two_party / m_of_n: refund each funded funder their contribution.
-        const funders = await listFunders(escrowId);
-        for (const f of funders.filter((row) => row.funded)) {
-          payouts.push({ recipient_pubkey: f.funder_pubkey, sats: f.amount_sats, address: f.refund_ln_address });
-        }
+      const funders = await listFunders(escrowId);
+      for (const f of funders.filter((row) => row.funded)) {
+        payouts.push({ recipient_pubkey: f.funder_pubkey, sats: f.amount_sats, address: f.refund_ln_address });
       }
     }
 
@@ -423,21 +406,19 @@ app.post(path.join(PREFIX, 'operator', 'escrows', ':escrowId', 'cancel'), requir
     }
 
     const refunds = [];
-    if (escrow.funding_model !== 'single_funder') {
-      const funders = await listFunders(escrowId);
-      for (const funder of funders.filter((row) => row.funded)) {
-        try {
-          await sendLightningPayout({
-            escrowId,
-            purpose: 'cancel-refund',
-            recipientPubkey: funder.funder_pubkey,
-            lnAddress: funder.refund_ln_address,
-            amountSats: funder.amount_sats,
-          });
-          refunds.push({ funder_pubkey: funder.funder_pubkey, refund_sats: funder.amount_sats, status: 'sent' });
-        } catch (err) {
-          refunds.push({ funder_pubkey: funder.funder_pubkey, refund_sats: funder.amount_sats, status: 'pending_bolt11', reason: err.message });
-        }
+    const funders = await listFunders(escrowId);
+    for (const funder of funders.filter((row) => row.funded)) {
+      try {
+        await sendLightningPayout({
+          escrowId,
+          purpose: 'cancel-refund',
+          recipientPubkey: funder.funder_pubkey,
+          lnAddress: funder.refund_ln_address,
+          amountSats: funder.amount_sats,
+        });
+        refunds.push({ funder_pubkey: funder.funder_pubkey, refund_sats: funder.amount_sats, status: 'sent' });
+      } catch (err) {
+        refunds.push({ funder_pubkey: funder.funder_pubkey, refund_sats: funder.amount_sats, status: 'pending_bolt11', reason: err.message });
       }
     }
     await transitionState(escrowId, escrow.state, 'canceled');
@@ -462,8 +443,6 @@ app.get(path.join(PREFIX, 'operator', 'descriptor'), (_req, res) => {
   if (descriptor.service && descriptor.service.schema) {
     descriptor.service.schema.url = config.SCHEMA_URL;
   }
-  descriptor.funding_rules.funding_threshold = 1;
-  descriptor.funding_rules.participant_count = config.MAX_PARTICIPANT_COUNT;
   descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
   descriptor.updated_at = Math.floor(Date.now() / 1000);
   res.json(descriptor);
@@ -650,10 +629,8 @@ async function recoverPendingPayouts() {
         : row.counterparty_pubkey;
     const payoutSats = Number.isInteger(decision.payout_sats) ? decision.payout_sats : row.amount_sats;
     let addr = recipient === 'creator' ? row.refund_ln_address : row.payout_ln_address;
-    if (row.funding_model !== 'single_funder') {
-      const recipientFunder = (await listFunders(row.escrow_id)).find((funder) => funder.funder_pubkey === recipientPubkey);
-      addr = recipientFunder?.payout_ln_address || recipientFunder?.refund_ln_address || addr;
-    }
+    const recipientFunder = (await listFunders(row.escrow_id)).find((funder) => funder.funder_pubkey === recipientPubkey);
+    addr = recipientFunder?.payout_ln_address || recipientFunder?.refund_ln_address || addr;
     if (!addr) continue;
     try {
       await sendLightningPayout({
@@ -695,7 +672,6 @@ async function init() {
   _initStarted = true;
   console.log('[startup] Environment validated ✓');
   console.log(`[startup] Service interface: ${config.SERVICE_INTERFACE}`);
-  console.log(`[startup] Funding model:    ${config.FUNDING_MODEL}`);
   console.log(`[startup] Accepted models:  ${config.ACCEPTED_FUNDING_MODELS.join(', ')}`);
   console.log(`[startup] Release decisions: ${config.ACCEPTED_RELEASE_DECISIONS.join(', ')}`);
   console.log(`[startup] Backend configured: ${hasBackend()}`);
