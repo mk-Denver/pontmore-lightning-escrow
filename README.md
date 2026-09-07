@@ -200,16 +200,6 @@ node scripts/list-descriptors.js            # list event ids
 node scripts/list-descriptors.js --delete   # list + broadcast kind 5 deletion
 ```
 
----
-
-## Deployment
-
-The service runs as a plain Express app (`node server.js`) on any Node host. An [Appwrite Functions](https://appwrite.io) adapter is also provided in `src/main.js` (see `appwrite.config.json`); the same Express `app` is bridged through the Appwrite request/response shape.
-
-Set `SERVICE_BASE_URL` to the public URL of the deployment so the descriptor and OpenAPI server block are rewritten correctly. Cron jobs cancel funding-timeout escrows with partial refunds and recover pending release payouts. The service never auto-releases without a valid decision.
-
----
-
 ## License
 
 See the repository for license information.
