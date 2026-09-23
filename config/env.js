@@ -185,6 +185,12 @@ const config = Object.freeze({
 
   // Platform fee (may be blank for descriptor-only loading)
   PLATFORM_FEE_PERCENTAGE:   Number(process.env.PLATFORM_FEE_PERCENTAGE) || 0,
+
+  // Payout routing fee (may be blank for descriptor-only loading).
+  // Decimal percentage of the gross payout, deducted upfront from the
+  // amount sent to the recipient so the operator does not front the
+  // Lightning routing cost. e.g. 0.01 = 1%.
+  PAYOUT_FEE_PERCENTAGE:     Number(process.env.PAYOUT_FEE_PERCENTAGE) || 0,
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,6 +203,15 @@ const config = Object.freeze({
  */
 function calculatePlatformFee(amountSats) {
   return Math.ceil(amountSats * config.PLATFORM_FEE_PERCENTAGE);
+}
+
+/**
+ * Routing/payout fee deducted upfront from a gross payout amount, in sats.
+ * Fee = ceil(amountSats * PAYOUT_FEE_PERCENTAGE).
+ * The recipient receives (amountSats - fee); the operator does not front it.
+ */
+function calculatePayoutFee(amountSats) {
+  return Math.ceil(amountSats * config.PAYOUT_FEE_PERCENTAGE);
 }
 
 /**
@@ -218,4 +233,4 @@ function hasBackend() {
   return Boolean(hasDb && config.BLINK_API_KEY);
 }
 
-module.exports = { config, calculatePlatformFee, splitPlatformFee, hasBackend };
+module.exports = { config, calculatePlatformFee, calculatePayoutFee, splitPlatformFee, hasBackend };

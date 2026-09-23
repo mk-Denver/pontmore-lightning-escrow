@@ -24,7 +24,7 @@ const path = require('path');
 const express = require('express');
 const cron = require('node-cron');
 
-const { config, hasBackend } = require('./config/env');
+const { config, hasBackend, calculatePayoutFee } = require('./config/env');
 const { requireNostrAuth } = require('./lib/nostr-auth');
 const { decodeNsec } = require('./lib/nostr-keys');
 const escrow = require('./lib/escrow');
@@ -52,10 +52,16 @@ function payoutIdempotencyKey(escrowId, purpose, recipientPubkey) {
 }
 
 async function sendLightningPayout({ escrowId, purpose, recipientPubkey, lnAddress, amountSats }) {
+  const routingFeeSats = calculatePayoutFee(amountSats);
+  const netSats = amountSats - routingFeeSats;
+  if (netSats < 1) {
+    throw new Error(`payout fee (${routingFeeSats}) consumes entire payout (${amountSats}) for ${escrowId}`);
+  }
   await blink.payToLightningAddress({
     lnAddress,
-    amountSats,
+    amountSats: netSats,
   });
+  console.log(`[payout] ${escrowId} ${purpose}: gross=${amountSats} fee=${routingFeeSats} net=${netSats}`);
   return true;
 }
 
