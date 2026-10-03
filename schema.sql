@@ -23,6 +23,7 @@ create table if not exists public.escrow_instances (
     description                text        not null default '',
     refund_ln_address          text,
     payout_ln_address          text,
+    application_pubkey          text check (application_pubkey is null or application_pubkey ~ '^[0-9a-f]{64}$'),
     idempotency_key            text        unique,
     invitation_token           text        unique,
     invitation_pubkey          text,
@@ -64,6 +65,7 @@ create unique index idx_escrow_creator_idempotency
 
 alter table public.escrow_instances alter column state set default 'created';
 alter table public.escrow_instances add column if not exists payout_claimed_at timestamptz;
+alter table public.escrow_instances add column if not exists application_pubkey text;
 update public.escrow_instances set state = case state
     when 'CREATED' then 'created'
     when 'PENDING_FUNDING' then 'created'

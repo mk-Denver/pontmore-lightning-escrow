@@ -184,6 +184,7 @@ app.post(path.join(PREFIX, 'create'), requireBackend, requireNostrAuth, async (r
       amountSats:       req.body.amount_sats,
       description:      req.body.description,
       refundLnAddress:  req.body.refund_ln_address,
+      applicationPubkey: req.body.application_pubkey,
       idempotencyKey:   req.body.idempotency_key,
       enrollmentToken:  req.body.enrollment_token,
       participantPubkeys: req.body.participant_pubkeys,

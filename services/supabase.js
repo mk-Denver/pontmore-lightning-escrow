@@ -92,6 +92,7 @@ async function createEscrowInstance({
   fundingThreshold,
   participantCount,
   refundLnAddress,
+  applicationPubkey,
   idempotencyKey,
 }) {
   const db = supabase();
@@ -121,6 +122,7 @@ async function createEscrowInstance({
       funding_threshold: fundingThreshold ?? null,
       participant_count: participantCount ?? null,
       refund_ln_address: refundLnAddress ?? null,
+      application_pubkey: applicationPubkey ?? null,
       idempotency_key:   idempotencyKey ?? null,
       funding_deadline:  new Date(Date.now() + config.FUNDING_TIMEOUT_SECONDS * 1000).toISOString(),
       state:             'created',
