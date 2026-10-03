@@ -24,7 +24,7 @@ const path = require('path');
 const express = require('express');
 const cron = require('node-cron');
 
-const { config, hasBackend, calculatePayoutFee } = require('./config/env');
+const { config, hasBackend, getRoutingFeeSats, isLightningAddress } = require('./config/env');
 const { requireNostrAuth } = require('./lib/nostr-auth');
 const { decodeNsec } = require('./lib/nostr-keys');
 const escrow = require('./lib/escrow');
@@ -52,10 +52,13 @@ function payoutIdempotencyKey(escrowId, purpose, recipientPubkey) {
 }
 
 async function sendLightningPayout({ escrowId, purpose, recipientPubkey, lnAddress, amountSats }) {
-  const routingFeeSats = calculatePayoutFee(amountSats);
+  if (!isLightningAddress(lnAddress)) {
+    throw new Error(`no valid Lightning Address for ${escrowId}; on-chain addresses are not supported`);
+  }
+  const routingFeeSats = getRoutingFeeSats();
   const netSats = amountSats - routingFeeSats;
   if (netSats < 1) {
-    throw new Error(`payout fee (${routingFeeSats}) consumes entire payout (${amountSats}) for ${escrowId}`);
+    throw new Error(`routing fee (${routingFeeSats}) consumes entire payout (${amountSats}) for ${escrowId}`);
   }
   await blink.payToLightningAddress({
     lnAddress,

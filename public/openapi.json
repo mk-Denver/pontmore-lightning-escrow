@@ -3,7 +3,7 @@
   "info": {
     "title": "Pontmore Escrow HTTP Service",
     "version": "1.0.0",
-    "description": "Normative wire contract for pontmore_escrow_http_v1. Implements PIP-01 standalone service interface: create, funding_instructions, fund_status, release, refund, cancel. Authentication uses NIP-98 (nostr_http_auth). Funding is two-party (1_of_2 or 2_of_2): amount_sats is the principal contribution required from each participant; release pays the sum of funded contributions, excluding platform fees. A configurable PAYOUT_FEE_PERCENTAGE routing fee is deducted upfront from each payout/refund and reported as routing_fee_sats / net_payout_sats."
+    "description": "Normative wire contract for pontmore_escrow_http_v1. Implements PIP-01 standalone service interface: create, funding_instructions, fund_status, release, refund, cancel. Authentication uses NIP-98 (nostr_http_auth). Funding is two-party (1_of_2 or 2_of_2): amount_sats is the principal contribution required from each participant; release pays the sum of funded contributions, excluding platform fees. A flat ROUTING_FEE_SATS routing fee is deducted upfront from each payout/refund and reported as routing_fee_sats / net_payout_sats. Payouts are supported only to Lightning Addresses (user@domain.tld); on-chain addresses are rejected."
   },
   "servers": [
     { "url": "https://escrow.example.com/pontmore/v1" }
@@ -30,7 +30,7 @@
         "properties": {
           "amount_sats": { "type": "integer", "minimum": 1, "description": "Principal contribution in satoshis required from each participant. Both participants contribute the same amount." },
           "description": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "refund_ln_address": { "type": "string", "description": "Lightning Address for refund payout" },
+          "refund_ln_address": { "type": "string", "description": "Lightning Address (user@domain.tld) for refund payout. On-chain addresses are not supported." },
           "idempotency_key": { "type": "string", "description": "Correlation value for request deduplication only; does not authorize participant joining" },
           "enrollment_token": { "type": "string", "description": "Single-use, signer-bound token for joining an existing escrow. Join requests require only this field." },
           "funding_model": { "type": "string", "enum": ["1_of_2", "2_of_2"], "description": "Required two-party funding model. 1_of_2: one of two declared funders must fund. 2_of_2: both funders must fund." },
@@ -138,8 +138,8 @@
           "escrow_id": { "type": "string", "format": "uuid" },
           "state": { "type": "string", "enum": ["released"] },
           "recipient": { "type": "string", "description": "creator or counterparty role" },
-          "payout_sats": { "type": "integer", "description": "Gross released principal: the sum of all funded participant contributions; platform fees are excluded. The routing fee is deducted from this before sending." },
-          "routing_fee_sats": { "type": "integer", "description": "Payout routing fee deducted upfront from payout_sats (ceil(payout_sats * PAYOUT_FEE_PERCENTAGE)). 0 when no Lightning Address is on file." },
+          "payout_sats": { "type": "integer", "description": "Gross released principal: the sum of all funded participant contributions; platform fees are excluded. The flat routing fee is deducted from this before sending." },
+          "routing_fee_sats": { "type": "integer", "description": "Flat routing fee deducted upfront from payout_sats (ROUTING_FEE_SATS, constant per payout)." },
           "net_payout_sats": { "type": "integer", "description": "Amount actually sent to the recipient: payout_sats - routing_fee_sats." },
           "payout": { "type": "object" }
         }

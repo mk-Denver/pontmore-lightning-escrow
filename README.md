@@ -99,7 +99,7 @@ Key variables:
 | `SUPABASE_PROJECT_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase backend. |
 | `BLINK_API_KEY` | Blink Lightning custody key. |
 | `PLATFORM_FEE_PERCENTAGE` | Decimal fee paid by the funder (e.g. `0.02` = 2%). |
-| `PAYOUT_FEE_PERCENTAGE` | Decimal routing fee deducted upfront from each payout/refund so the operator does not front the Lightning routing cost (e.g. `0.01` = 1%). `0` disables it. |
+| `ROUTING_FEE_SATS` | Flat routing fee in sats, deducted upfront from each payout/refund so the operator does not front the Lightning routing cost (e.g. `14` = 14 sats per payout). `0` disables it. |
 
 ### 2. Initialize the database
 

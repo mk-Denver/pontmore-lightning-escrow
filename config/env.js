@@ -186,11 +186,9 @@ const config = Object.freeze({
   // Platform fee (may be blank for descriptor-only loading)
   PLATFORM_FEE_PERCENTAGE:   Number(process.env.PLATFORM_FEE_PERCENTAGE) || 0,
 
-  // Payout routing fee (may be blank for descriptor-only loading).
-  // Decimal percentage of the gross payout, deducted upfront from the
-  // amount sent to the recipient so the operator does not front the
-  // Lightning routing cost. e.g. 0.01 = 1%.
-  PAYOUT_FEE_PERCENTAGE:     Number(process.env.PAYOUT_FEE_PERCENTAGE) || 0,
+  // Flat routing fee, in sats, deducted upfront from each payout so the
+  // operator does not front the Lightning routing cost. Constant per payout.
+  ROUTING_FEE_SATS:          Number(process.env.ROUTING_FEE_SATS) || 0,
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -206,12 +204,25 @@ function calculatePlatformFee(amountSats) {
 }
 
 /**
- * Routing/payout fee deducted upfront from a gross payout amount, in sats.
- * Fee = ceil(amountSats * PAYOUT_FEE_PERCENTAGE).
+ * Routing/payout fee deducted upfront from a gross payout, in sats.
+ * Flat constant (ROUTING_FEE_SATS), independent of the payout amount.
  * The recipient receives (amountSats - fee); the operator does not front it.
  */
-function calculatePayoutFee(amountSats) {
-  return Math.ceil(amountSats * config.PAYOUT_FEE_PERCENTAGE);
+function getRoutingFeeSats() {
+  return config.ROUTING_FEE_SATS;
+}
+
+/**
+ * Validate that a payout/refund address is a Lightning Address
+ * (user@domain.tld). On-chain bitcoin addresses and BOLT11 invoices are
+ * rejected — only Lightning Addresses are supported for payouts.
+ */
+function isLightningAddress(addr) {
+  if (typeof addr !== 'string' || !addr.includes('@')) return false;
+  const [local, domain] = addr.split('@');
+  if (!local || !domain) return false;
+  if (!domain.includes('.') || domain.startsWith('.') || domain.endsWith('.')) return false;
+  return true;
 }
 
 /**
@@ -233,4 +244,4 @@ function hasBackend() {
   return Boolean(hasDb && config.BLINK_API_KEY);
 }
 
-module.exports = { config, calculatePlatformFee, calculatePayoutFee, splitPlatformFee, hasBackend };
+module.exports = { config, calculatePlatformFee, getRoutingFeeSats, isLightningAddress, splitPlatformFee, hasBackend };
