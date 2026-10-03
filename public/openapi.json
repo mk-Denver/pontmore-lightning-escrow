@@ -31,6 +31,7 @@
           "amount_sats": { "type": "integer", "minimum": 1, "description": "Principal contribution in satoshis required from each participant. Both participants contribute the same amount." },
           "description": { "type": "string", "minLength": 1, "maxLength": 500 },
           "refund_ln_address": { "type": "string", "description": "Lightning Address (user@domain.tld) for refund payout. On-chain addresses are not supported." },
+          "application_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Optional hex application signer pubkey pinned to this escrow instance. When set, the application_signed_result release decision requires a valid signature from exactly this pubkey. Immutable after creation." },
           "idempotency_key": { "type": "string", "description": "Correlation value for request deduplication only; does not authorize participant joining" },
           "enrollment_token": { "type": "string", "description": "Single-use, signer-bound token for joining an existing escrow. Join requests require only this field." },
           "funding_model": { "type": "string", "enum": ["1_of_2", "2_of_2"], "description": "Required two-party funding model. 1_of_2: one of two declared funders must fund. 2_of_2: both funders must fund." },
@@ -56,6 +57,7 @@
           "counterparty_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true },
           "amount_sats": { "type": "integer", "description": "Principal contribution per participant." },
           "platform_fee_sats": { "type": "integer" },
+          "application_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true, "description": "The application signer pubkey pinned to this instance, or null when none was set. Immutable after creation." },
           "funding_model": { "type": "string", "enum": ["1_of_2", "2_of_2"] },
           "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded participant count: 1 for 1_of_2, 2 for 2_of_2" },
           "participant_count": { "type": "integer", "nullable": true, "description": "Total declared participants; always 2 (two-party escrow)" },
@@ -73,6 +75,7 @@
           "counterparty_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "amount_sats": { "type": "integer", "description": "Principal contribution per participant." },
           "platform_fee_sats": { "type": "integer" },
+          "application_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true, "description": "The application signer pubkey pinned to this instance, or null when none was set." },
           "funding_model": { "type": "string", "enum": ["1_of_2", "2_of_2"] },
           "funding_threshold": { "type": "integer", "nullable": true },
           "participant_count": { "type": "integer", "nullable": true }
@@ -103,7 +106,8 @@
           "total_funders": { "type": "integer", "nullable": true, "description": "Total registered funders" },
           "funding_threshold": { "type": "integer", "nullable": true, "description": "Required funded count to reach active (1 for 1_of_2, 2 for 2_of_2)" },
           "my_funded": { "type": "boolean", "nullable": true, "description": "Whether the requesting funder's invoice is paid" },
-          "funder_status": { "type": "string", "nullable": true, "description": "Per-funder invoice state for the requesting participant. Possible values: no_invoice or expired." }
+          "funder_status": { "type": "string", "nullable": true, "description": "Per-funder invoice state for the requesting participant. Possible values: no_invoice or expired." },
+          "application_pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$", "nullable": true, "description": "The application signer pubkey pinned to this instance, or null when none was set." }
         }
       },
       "SignatureEntry": {
@@ -434,7 +438,7 @@
       "mutual_consent": "Release or refund authorized by all declared participants.",
       "operator_decision": "Release or refund authorized by the escrow operator as arbiter.",
       "oracle_signature": "Release or refund authorized by a signature from a referenced oracle. The schema MUST name the referenced oracle explicitly and bind the decision to that oracle's public key.",
-      "application_signed_result": "Release or refund authorized by a signed result from the originating application. The application signer is identified by the signature entry and is not restricted to a preconfigured allowlist. Signed payload MUST include escrow identifier and result identifier/hash; signatures are BIP-340 Schnorr.",
+      "application_signed_result": "Release or refund authorized by a signed result from the originating application. The application signer pubkey MUST be pinned to the escrow instance at creation via application_pubkey; the signature is verified against exactly that bound pubkey. Signed payload MUST include escrow identifier and result identifier/hash; signatures are BIP-340 Schnorr. application_signed_result is rejected when no application_pubkey is bound.",
       "threshold_participant_signatures": "Release or refund authorized by a threshold of participant signatures. Schema MUST define the threshold value and the location of the participant signatures."
     }
   },

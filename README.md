@@ -95,7 +95,7 @@ Key variables:
 | `DECISION_MAX_AGE_SECONDS` | Maximum accepted release-decision age. |
 | `ORACLE_PUBKEYS` | Trusted oracle identities when `oracle_signature` is advertised. |
 | `OPERATOR_PUBKEY` / `OPERATOR_NSEC` | Operator Nostr identity (npub/hex and nsec). |
-| `APPLICATION_SIGNER_PUBKEYS` | Legacy deployment metadata; `application_signed_result` accepts any valid signature, not only listed keys. |
+| `APPLICATION_SIGNER_PUBKEYS` | Legacy deployment metadata. `application_signed_result` is now bound to the per-instance `application_pubkey` set at creation, not a service-wide allowlist. |
 | `SUPABASE_PROJECT_URL` / `SUPABASE_SERVICE_ROLE_KEY` | Supabase backend. |
 | `BLINK_API_KEY` | Blink Lightning custody key. |
 | `PLATFORM_FEE_PERCENTAGE` | Decimal fee paid by the funder (e.g. `0.02` = 2%). |
