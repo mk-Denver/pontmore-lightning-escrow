@@ -192,6 +192,71 @@
           "dispute_opened_by": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The bound participant pubkey that raised the dispute (identity confirmed via NIP-98)." },
           "dispute_opened_at": { "type": "string", "format": "date-time" }
         }
+      },
+      "NostrEvent": {
+        "type": "object",
+        "required": ["id", "kind", "pubkey", "created_at", "tags", "content", "sig"],
+        "description": "A signed Nostr event (NIP-01). PIP-02 uses kind 7300 for coordination roots and kind 7301 for actions.",
+        "properties": {
+          "id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "kind": { "type": "integer" },
+          "pubkey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "created_at": { "type": "integer", "description": "Unix seconds" },
+          "tags": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
+          "content": { "type": "string", "description": "JSON-serialized payload" },
+          "sig": { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+        }
+      },
+      "CoordinationRootRequest": {
+        "type": "object",
+        "required": ["event"],
+        "properties": {
+          "event": { "$ref": "#/components/schemas/NostrEvent", "description": "Signed kind 7300 coordination root event. Tags: p (participants/authorities), e (escrow descriptor, marker escrow-version), a (descriptor address, marker escrow). Content: { version: 2, profile, terms, expires_at, commitments? }." }
+        }
+      },
+      "CoordinationRootResponse": {
+        "type": "object",
+        "required": ["coordination_id", "state", "profile", "valid"],
+        "properties": {
+          "coordination_id": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The root event id (Nostr event id)" },
+          "state": { "type": "string", "enum": ["proposed"] },
+          "profile": { "type": "string", "description": "Coordination profile identifier (e.g. pontmore/swap@1)" },
+          "valid": { "type": "boolean" }
+        }
+      },
+      "CoordinationActionRequest": {
+        "type": "object",
+        "required": ["event"],
+        "properties": {
+          "event": { "$ref": "#/components/schemas/NostrEvent", "description": "Signed kind 7301 coordination action event. Tags: e (root id, marker root), e (predecessor id, marker prev). Content: { version: 2, action, data? }." }
+        }
+      },
+      "CoordinationActionResponse": {
+        "type": "object",
+        "required": ["action_id", "action_type", "coordination_id", "state", "terminal"],
+        "properties": {
+          "action_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "action_type": { "type": "string", "description": "Kernel (core/*) or profile action identifier" },
+          "coordination_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "state": { "type": "string", "description": "Derived coordination state after replaying the chain" },
+          "terminal": { "type": "boolean" },
+          "errors": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "CoordinationStateResponse": {
+        "type": "object",
+        "required": ["coordination_id", "state", "terminal", "forked", "profile"],
+        "properties": {
+          "coordination_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "state": { "type": "string", "description": "Derived coordination state (proposed, accepted, secured, fiat_sent, fiat_confirmed, settlement_authorized, settled, refund_authorized, refunded, cancelled, expired, disputed, forked, invalid)" },
+          "terminal": { "type": "boolean" },
+          "forked": { "type": "boolean" },
+          "profile": { "type": "string" },
+          "root_event": { "$ref": "#/components/schemas/NostrEvent" },
+          "actions": { "type": "array", "items": { "type": "object", "properties": { "action_id": { "type": "string" }, "action_type": { "type": "string" }, "signer": { "type": "string" }, "created_at": { "type": "string" }, "data": { "type": "object" } } } },
+          "derived_history": { "type": "array", "items": { "type": "object" } },
+          "errors": { "type": "array", "items": { "type": "string" } }
+        }
       }
     },
     "responses": {
@@ -370,6 +435,44 @@
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/coordination/root": {
+      "post": {
+        "summary": "coordination_root",
+        "description": "Submit a signed PIP-02 coordination root event (Nostr kind 7300). The service validates the event against the pinned coordination profile (pontmore/swap@1) and stores it. The root event binds participants, authorities (core/escrow, core/resolver), the accepted escrow descriptor, and the coordination terms.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoordinationRootRequest" } } } },
+        "responses": {
+          "200": { "description": "Coordination root accepted and stored", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoordinationRootResponse" } } } },
+          "400": { "description": "Validation error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/coordination/action": {
+      "post": {
+        "summary": "coordination_action",
+        "description": "Submit a signed PIP-02 coordination action event (Nostr kind 7301). The service validates the event's linkage (root + prev), signer authorization, and kernel invariants, stores it, and re-derives the coordination state by replaying the full chain.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoordinationActionRequest" } } } },
+        "responses": {
+          "200": { "description": "Action accepted and chain state derived", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoordinationActionResponse" } } } },
+          "400": { "description": "Validation error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/coordination/{coordinationId}": {
+      "get": {
+        "summary": "coordination_state",
+        "description": "Retrieve the current derived state of a PIP-02 coordination by replaying its validated root and action chain. Returns the state, terminal flag, fork status, action history, and any validation errors.",
+        "parameters": [{ "name": "coordinationId", "in": "path", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }],
+        "responses": {
+          "200": { "description": "Coordination state", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CoordinationStateResponse" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
     }

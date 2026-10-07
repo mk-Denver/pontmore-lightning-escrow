@@ -279,3 +279,81 @@ create trigger trg_escrow_updated_at
     before update on public.escrow_instances
     for each row
     execute function public.set_updated_at();
+
+-- ============================================================================
+-- PIP-02: Coordination event chains
+--
+-- Stores validated coordination roots (kind 7300) and append-only actions
+-- (kind 7301). The chain tip is tracked per root for linear progression.
+-- Fork detection is performed at insertion time: two actions referencing
+-- the same predecessor freeze the coordination.
+-- ============================================================================
+
+create table if not exists public.coordination_roots (
+    coordination_id      text        primary key,  -- Nostr event id of the root
+    event_pubkey         text        not null,
+    created_at           timestamptz not null,
+    profile              text        not null,
+    content              jsonb       not null,
+    raw_event            jsonb       not null,
+    escrow_descriptor_id text        not null,   -- e tag: exact descriptor event id
+    escrow_descriptor_addr text      not null,   -- a tag: 30361:pubkey:d-tag
+    state                text        not null default 'proposed',
+    chain_tip            text,                     -- event id of the latest action
+    forked               boolean     not null default false,
+    stored_at            timestamptz not null default now()
+);
+
+create index if not exists idx_coord_roots_pubkey on public.coordination_roots (event_pubkey);
+
+create table if not exists public.coordination_actions (
+    action_id            text        primary key,  -- Nostr event id of the action
+    coordination_id      text        not null references public.coordination_roots(coordination_id) on delete cascade,
+    event_pubkey         text        not null,
+    created_at           timestamptz not null,
+    action_type          text        not null,
+    prev_id              text        not null,     -- predecessor event id
+    content              jsonb       not null,
+    data                 jsonb,
+    raw_event            jsonb       not null,
+    stored_at            timestamptz not null default now()
+);
+
+create index if not exists idx_coord_actions_root    on public.coordination_actions (coordination_id);
+create index if not exists idx_coord_actions_prev     on public.coordination_actions (prev_id);
+create index if not exists idx_coord_actions_type     on public.coordination_actions (action_type);
+
+-- Fork detection: if two actions share the same prev_id for one root,
+-- the coordination is forked. This trigger marks the root as forked.
+create or replace function public.detect_coordination_fork()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+    sibling_count integer;
+begin
+    select count(*) into sibling_count
+      from public.coordination_actions
+     where coordination_id = new.coordination_id
+       and prev_id = new.prev_id
+       and action_id <> new.action_id;
+
+    if sibling_count > 0 then
+        update public.coordination_roots
+           set forked = true, state = 'forked'
+         where coordination_id = new.coordination_id;
+    end if;
+    return new;
+end;
+$$;
+
+drop trigger if exists trg_coord_action_fork on public.coordination_actions;
+create trigger trg_coord_action_fork
+    after insert on public.coordination_actions
+    for each row
+    execute function public.detect_coordination_fork();
+
+revoke all on function public.detect_coordination_fork() from public, anon, authenticated;
+grant execute on function public.detect_coordination_fork() to service_role;

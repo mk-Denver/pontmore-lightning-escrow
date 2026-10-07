@@ -1,14 +1,27 @@
 # Pontmore Escrow Service
 
-A [PIP-01](https://github.com/pontmore) conformant **custodial escrow service** over HTTPS for the Bitcoin Lightning Network. It holds sats in custody until a verifiable release/refund decision is reached, then pays out to a Lightning address. Identity and authorization are provided by Nostr (NIP-98 HTTP auth).
+A [PIP-01](https://github.com/pontmore/protocol) conformant **custodial escrow service** over HTTPS for the Bitcoin Lightning Network. It holds sats in custody until a verifiable release/refund decision is reached, then pays out to a Lightning address. Identity and authorization are provided by Nostr (NIP-98 HTTP auth).
 
-The service is discoverable on the Nostr network via signed `kind 30361` escrow descriptor events per [PIP-01](https://github.com/pontmore/protocol) (compatibility/discovery object — service behavior is defined by the referenced `schema_url`).
+The service is discoverable on the Nostr network via signed `kind 30361` escrow descriptor events per [PIP-01](https://github.com/pontmore/protocol/blob/main/PIP-01-escrow-descriptor.md) (compatibility/discovery object — service behavior is defined by the referenced `service.schema`).
+
+It also implements **[PIP-02](https://github.com/pontmore/protocol/blob/main/PIP-02-coordination-event-chains.md) coordination event chains** — immutable coordination roots (Nostr kind 7300) and append-only linked actions (kind 7301) — with the `pontmore/swap@1` bilateral fiat/Bitcoin swap profile.
+
+---
+
+## Conformance Profiles
+
+| Profile | PIPs | Status |
+|---|---|---|
+| **Escrow Discovery** | PIP-01 | Implemented — descriptor publishing, validation, and serving |
+| **Swap Coordination** | PIP-01 + PIP-02 + `pontmore/swap@1` | Implemented (experimental) — coordination root/action submission, chain validation, state derivation |
 
 ---
 
 ## Features
 
-- **PIP-01 conformant descriptor** — the descriptor declares `escrow_type`, `networks`, `funding_rules`, `dispute_rules`, and a `service.schema` pointer; service behaviour is defined by the referenced OpenAPI schema.
+- **PIP-01 conformant descriptor** — the descriptor declares `version`, `escrow_type`, `networks`, `expires_at`, and a `service.schema` pointer (OpenAPI). All service behavior (funding, release, disputes, fees) is owned by the referenced schema. Published as signed `kind 30361` Nostr events with `t` tags matching `content.networks`.
+- **PIP-02 coordination chains** — submit and validate coordination roots (kind 7300) and actions (kind 7301). Chain replay, kernel invariants, fork detection, and dispute handling per the PIP-02 kernel.
+- **`pontmore/swap@1` profile** — bilateral fiat/Bitcoin swap: direction, fiat/bitcoin terms, deadlines, `swap/fiat_sent` / `swap/fiat_confirmed` actions, dispute classes, and authorization rules.
 - **Nostr-native auth (NIP-98)** — every mutating request carries a signed `kind 27235` auth event; the authenticated Nostr pubkey *is* the participant identity.
 - **Two two-party funding models** (PIP-01 `m of n` with `n = 2`)
   - `1_of_2` — one of the two declared funders must fund; the escrow activates on either payment.
@@ -16,9 +29,9 @@ The service is discoverable on the Nostr network via signed `kind 30361` escrow 
 - **Open enrollment** — `create` issues opaque single-use enrollment tokens; no pre-declared participant pubkeys required. The joining NIP-98 signer is bound to the token at redemption.
 - **Five release-decision formats** (configurable subset per deployment):
   `mutual_consent`, `operator_decision`, `oracle_signature`, `application_signed_result`, `threshold_participant_signatures`.
-  `application_signed_result` accepts any valid Schnorr signature (no preconfigured allowlist).
-- **Lightning custody via [Blink](https://blink.sv)** — invoice creation, payment status, and payouts to Lightning addresses / BOLT11.
-- **Durable storage via [Supabase](https://supabase.com)** — Postgres with an atomic state-transition RPC.
+  `application_signed_result` is bound to a per-instance `application_pubkey` pinned at creation.
+- **Lightning custody via [Blink](https://blink.sv)** — invoice creation, payment status, and payouts to Lightning addresses.
+- **Durable storage via [Supabase](https://supabase.com)** — Postgres with atomic state-transition RPCs.
 - **Operator dashboard** — a static web UI plus protected endpoints to list escrows, file/resolve disputes, and publish/unpublish the descriptor.
 - **Descriptor-only mode** — when Supabase/Blink credentials are blank, the service still serves the descriptor and OpenAPI schema (useful for discovery testing).
 
@@ -27,15 +40,20 @@ The service is discoverable on the Nostr network via signed `kind 30361` escrow 
 ## Architecture
 
 ```
-server.js                       Express app: public, protected, and operator routes
+server.js                       Express app: public, protected, operator, and PIP-02 coordination routes
 config/env.js                   Validated configuration + fee helpers
 lib/
   escrow.js                     Core escrow operations (state machine orchestration)
   release-decisions.js          Schnorr verification of release/refund decisions
   nostr-auth.js                 NIP-98 auth middleware
   nostr-keys.js                 nsec / npub / hex key decoding
+  nostr-event.js                Nostr event sign/verify helpers (PIP-01 + PIP-02)
+  pip01.js                      PIP-01 descriptor event validation
+  pip02.js                       PIP-02 coordination chain engine (kernel)
+  swap-profile.js               pontmore/swap@1 coordination profile
 services/
   supabase.js                   Escrow + funder persistence, atomic state transitions
+  coordination.js              PIP-02 coordination root/action storage + chain replay
   blink.js                      Lightning invoice + payout integration
 scripts/
   publish-descriptor.js         Build, sign & broadcast the kind 30361 descriptor
@@ -46,7 +64,7 @@ public/
   openapi.json                  Normative wire contract (schema_url target)
   operator/index.html           Operator dashboard UI
 src/main.js                    Appwrite Functions adapter (alternative host)
-schema.sql                      Postgres schema + transition_escrow_state RPC
+schema.sql                      Postgres schema + transition RPCs + PIP-02 coordination tables
 ```
 
 ### Escrow state machine
@@ -140,6 +158,14 @@ All protected routes live under `SERVICE_PATH_PREFIX` (default `/pontmore/v1`) a
 | `POST` | `/pontmore/v1/refund` | same as release | Refund funds to the funder(s). |
 | `POST` | `/pontmore/v1/cancel` | `escrow_id` | Cancel before funding, or after funding timeout with automatic partial refunds. |
 | `POST` | `/pontmore/v1/disputes` | `escrow_id`, `dispute_class`, `summary` | Raise a dispute. Caller must be a bound participant of the escrow (NIP-98 confirmed). Moves `active`/`release_pending` → `disputed`; the operator resolves under PIP-03. |
+
+### PIP-02 Coordination (NIP-98)
+
+| Method | Path | Body | Description |
+| --- | --- | --- | --- |
+| `POST` | `/pontmore/v1/coordination/root` | `{ event: <kind 7300 Nostr event> }` | Submit a signed coordination root. Validates against `pontmore/swap@1`, stores it, returns the coordination id. |
+| `POST` | `/pontmore/v1/coordination/action` | `{ event: <kind 7301 Nostr event> }` | Submit a signed coordination action. Validates linkage, authorization, and kernel invariants; re-derives state. |
+| `GET` | `/pontmore/v1/coordination/:coordinationId` | — | Retrieve the derived coordination state by replaying the full chain. |
 
 ### Operator (NIP-98 + `OPERATOR_PUBKEY`)
 

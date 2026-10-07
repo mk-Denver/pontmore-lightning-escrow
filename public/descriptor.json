@@ -2,22 +2,11 @@
   "version": 1,
   "escrow_type": "custodial_escrow",
   "networks": ["lightning"],
-  "funding_rules": {
-    "funding_threshold": 1,
-    "participant_count": 2,
-    "required_confirmation": "invoice_paid",
-    "funding_timeout": "24_hours"
-  },
-  "dispute_rules": {
-    "policy": "operator_resolved",
-    "timeout_fallback": "operator_decision"
-  },
-  "reference_format": "bolt11_or_custodial_escrow_reference",
   "service": {
     "schema": {
       "type": "openapi",
       "url": "https://escrow.example.com/pontmore/v1/openapi/v1.0.0.json"
     }
   },
-  "updated_at": 1775559028
+  "expires_at": 1780000000
 }

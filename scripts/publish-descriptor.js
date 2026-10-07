@@ -37,13 +37,17 @@ function decodeNsec(nsec) {
 }
 
 function buildDescriptorEvent(descriptor, pubkeyHex, privkeyHex) {
+  const tags = [
+    ['d', 'escrow'],
+  ];
+  for (const network of descriptor.networks) {
+    tags.push(['t', `pontmore-network:${network}`]);
+  }
+
   const event = {
     kind: KIND_ESCROW_DESCRIPTOR,
     created_at: Math.floor(Date.now() / 1000),
-    tags: [
-      ['d', 'escrow'],
-      ['network', 'lightning'],
-    ],
+    tags,
     content: JSON.stringify(descriptor),
     pubkey: pubkeyHex,
   };
@@ -130,8 +134,6 @@ async function main() {
   if (descriptor.service && descriptor.service.schema) {
     descriptor.service.schema.url = config.SCHEMA_URL;
   }
-  descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
-  descriptor.updated_at = Math.floor(Date.now() / 1000);
 
   const privkeyHex = decodeNsec(config.OPERATOR_NSEC);
   const pubkeyHex = hx(secp256k1.getPublicKey(privkeyHex)).slice(2);

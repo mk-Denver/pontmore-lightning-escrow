@@ -40,6 +40,9 @@ const {
   transitionState,
 } = require('./services/supabase');
 const blink = require('./services/blink');
+const pip02 = require('./lib/pip02');
+const swapProfile = require('./lib/swap-profile');
+const coordination = require('./services/coordination');
 
 const { schnorr } = require('@noble/curves/secp256k1');
 const { sha256 } = require('@noble/hashes/sha256');
@@ -126,8 +129,6 @@ app.get(path.join(config.SERVICE_PATH_PREFIX, 'descriptor'), (_req, res) => {
   if (descriptor.service && descriptor.service.schema) {
     descriptor.service.schema.url = config.SCHEMA_URL;
   }
-  descriptor.funding_rules.funding_timeout = `${config.FUNDING_TIMEOUT_SECONDS}_seconds`;
-  descriptor.updated_at = Math.floor(Date.now() / 1000);
   res.json(descriptor);
 });
 
@@ -614,6 +615,157 @@ function handleError(res, err) {
   console.error('[server] unhandled error:', err.message, err.stack);
   return res.status(500).json({ error: err.message || 'internal server error' });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PIP-02 Coordination endpoints
+//
+// Submit and validate coordination roots (kind 7300) and actions (kind 7301)
+// per the PIP-02 coordination event chain spec. The pontmore/swap@1 profile
+// is loaded for swap coordinations.
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.post(path.join(PREFIX, 'coordination', 'root'), requireBackend, requireNostrAuth, async (req, res) => {
+  try {
+    const event = req.body.event;
+    if (!event || typeof event !== 'object') {
+      return res.status(400).json({ error: 'body must contain an "event" object (Nostr kind 7300)' });
+    }
+    const rootResult = pip02.validateRoot(event, swapProfile);
+    if (!rootResult.valid) {
+      return res.status(400).json({ error: 'root validation failed', errors: rootResult.errors });
+    }
+
+    // Extract escrow descriptor references from tags.
+    const eEscrow = (event.tags || []).find((t) => t[0] === 'e' && t[3] === 'escrow-version');
+    const aEscrow = (event.tags || []).find((t) => t[0] === 'a' && t[3] === 'escrow');
+
+    await coordination.storeRoot(event, {
+      content: rootResult.root.content,
+      escrowDescriptorId: eEscrow?.[1] ?? null,
+      escrowDescriptorAddr: aEscrow?.[1] ?? null,
+    });
+
+    res.json({
+      coordination_id: event.id,
+      state: 'proposed',
+      profile: rootResult.root.content.profile,
+      valid: true,
+    });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+app.post(path.join(PREFIX, 'coordination', 'action'), requireBackend, requireNostrAuth, async (req, res) => {
+  try {
+    const event = req.body.event;
+    if (!event || typeof event !== 'object') {
+      return res.status(400).json({ error: 'body must contain an "event" object (Nostr kind 7301)' });
+    }
+
+    // Extract the root reference to look up the coordination.
+    const rootRef = (event.tags || []).find((t) => t[0] === 'e' && t[3] === 'root');
+    if (!rootRef) {
+      return res.status(400).json({ error: 'action must contain an e tag with marker "root"' });
+    }
+    const coordinationId = rootRef[1];
+
+    const rootRow = await coordination.getRoot(coordinationId);
+    if (!rootRow) {
+      return res.status(404).json({ error: 'coordination root not found' });
+    }
+    if (rootRow.forked) {
+      return res.status(409).json({ error: 'coordination is forked; no further actions accepted' });
+    }
+
+    const expectedPrev = rootRow.chain_tip || coordinationId;
+    const actResult = pip02.validateAction(event, {
+      eventId: rootRow.coordination_id,
+      pubkey: rootRow.event_pubkey,
+      createdAt: Math.floor(new Date(rootRow.created_at).getTime() / 1000),
+      roleMap: (() => {
+        const map = {};
+        for (const tag of rootRow.raw_event.tags) {
+          if (tag[0] === 'p') {
+            const role = tag[3];
+            if (!map[role]) map[role] = [];
+            map[role].push(tag[1]);
+          }
+        }
+        return map;
+      })(),
+      content: rootRow.content,
+    }, expectedPrev);
+
+    if (!actResult.valid) {
+      return res.status(400).json({ error: 'action validation failed', errors: actResult.errors });
+    }
+
+    const prevRef = (event.tags || []).find((t) => t[0] === 'e' && t[3] === 'prev');
+    await coordination.storeAction(event, {
+      coordinationId,
+      actionType: actResult.action.actionType,
+      prevId: prevRef?.[1] ?? expectedPrev,
+      content: actResult.action.content,
+      data: actResult.action.data,
+    });
+
+    // Re-derive the full state by replaying the chain.
+    const chain = await coordination.getOrderedChain(coordinationId);
+    const rootParsed = pip02.validateRoot(rootRow.raw_event, swapProfile);
+    const actionEvents = chain.actions.map((a) => a.raw_event);
+    const stateResult = pip02.validateChain(rootRow.raw_event, actionEvents, swapProfile);
+
+    if (stateResult.valid) {
+      await coordination.updateState(coordinationId, stateResult.state, stateResult.terminal, stateResult.forked);
+    }
+
+    res.json({
+      action_id: event.id,
+      action_type: actResult.action.actionType,
+      coordination_id: coordinationId,
+      state: stateResult.state,
+      terminal: stateResult.terminal,
+      errors: stateResult.errors,
+    });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
+
+app.get(path.join(PREFIX, 'coordination', ':coordinationId'), requireBackend, requireNostrAuth, async (req, res) => {
+  try {
+    const coordinationId = req.params.coordinationId;
+    const rootRow = await coordination.getRoot(coordinationId);
+    if (!rootRow) {
+      return res.status(404).json({ error: 'coordination root not found' });
+    }
+
+    const chain = await coordination.getOrderedChain(coordinationId);
+    const actionEvents = chain.actions.map((a) => a.raw_event);
+    const stateResult = pip02.validateChain(rootRow.raw_event, actionEvents, swapProfile);
+
+    res.json({
+      coordination_id: coordinationId,
+      state: stateResult.valid ? stateResult.state : 'invalid',
+      terminal: stateResult.terminal,
+      forked: rootRow.forked,
+      profile: rootRow.profile,
+      root_event: rootRow.raw_event,
+      actions: chain.actions.map((a) => ({
+        action_id: a.action_id,
+        action_type: a.action_type,
+        signer: a.event_pubkey,
+        created_at: a.created_at,
+        data: a.data,
+      })),
+      derived_history: stateResult.history,
+      errors: stateResult.errors,
+    });
+  } catch (err) {
+    handleError(res, err);
+  }
+});
 
 app.use((req, res) => res.status(404).json({ error: 'not found' }));
 
