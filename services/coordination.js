@@ -11,11 +11,21 @@
 const { supabase } = require('./supabase');
 
 /**
- * Store a validated coordination root event.
+ * Store a validated coordination root event. Insert-only: if a root with
+ * the same coordination_id already exists, the call is a no-op — state,
+ * chain_tip, and forked are never overwritten.
  */
 async function storeRoot(rootEvent, parsed) {
   const db = supabase();
-  const { error } = await db.from('coordination_roots').upsert({
+
+  // Check if the root already exists (insert-only semantics).
+  const { data: existing } = await db.from('coordination_roots')
+    .select('coordination_id')
+    .eq('coordination_id', rootEvent.id)
+    .maybeSingle();
+  if (existing) return; // no-op: never overwrite live coordination state
+
+  const { error } = await db.from('coordination_roots').insert({
     coordination_id: rootEvent.id,
     event_pubkey: rootEvent.pubkey,
     created_at: new Date(rootEvent.created_at * 1000).toISOString(),
@@ -27,8 +37,9 @@ async function storeRoot(rootEvent, parsed) {
     state: 'proposed',
     chain_tip: rootEvent.id,
     forked: false,
-  }, { onConflict: 'coordination_id' });
+  });
 
+  if (error?.code === '23505') return; // race: another insert won, treat as no-op
   if (error) throw new Error(`[coordination] storeRoot failed: ${error.message}`);
 }
 
@@ -46,8 +57,11 @@ async function getRoot(coordinationId) {
 }
 
 /**
- * Store a validated coordination action event.
- * Returns the updated chain tip.
+ * Store a validated coordination action event and atomically advance the
+ * chain tip. The tip update is a compare-and-set: only advances if the
+ * current tip matches the action's predecessor (prevId). If another action
+ * already advanced the tip (concurrent submission), the update matches 0
+ * rows — the caller treats this as a fork/concurrency error.
  */
 async function storeAction(actionEvent, parsed) {
   const db = supabase();
@@ -62,14 +76,27 @@ async function storeAction(actionEvent, parsed) {
     data: parsed.data || null,
     raw_event: actionEvent,
   });
+  if (error?.code === '23505') {
+    throw new Error(`[coordination] duplicate action_id or (coordination_id, prev_id) — possible fork or replay`);
+  }
   if (error) throw new Error(`[coordination] storeAction failed: ${error.message}`);
 
-  // Update the chain tip (unless forked).
-  const { error: updateErr } = await db.from('coordination_roots')
+  // Compare-and-set the chain tip: only advance if the current tip is the
+  // predecessor AND the root is not forked.
+  const { data: tipUpdate, error: updateErr } = await db.from('coordination_roots')
     .update({ chain_tip: actionEvent.id })
     .eq('coordination_id', parsed.coordinationId)
-    .eq('forked', false);
+    .eq('chain_tip', parsed.prevId)
+    .eq('forked', false)
+    .select('coordination_id')
+    .maybeSingle();
   if (updateErr) throw new Error(`[coordination] chain tip update failed: ${updateErr.message}`);
+  if (!tipUpdate) {
+    // The tip didn't match — either a concurrent action won, or the root
+    // is forked. The action is stored (it's evidence of the fork) but the
+    // tip was not advanced.
+    throw new Error(`[coordination] chain tip was not at ${parsed.prevId}; concurrent action or fork detected`);
+  }
 }
 
 /**
@@ -100,7 +127,6 @@ async function getOrderedChain(coordinationId) {
   }
 
   const ordered = [];
-  let current = root.chain_tip && root.forked ? null : root.coordination_id;
   // Walk forward from root: root id is the first "prev" for the first action.
   let prev = root.coordination_id;
   while (true) {
@@ -118,15 +144,16 @@ async function getOrderedChain(coordinationId) {
 }
 
 /**
- * Update the derived state on the root row.
+ * Update the derived state on the root row. Never overwrites a forked or
+ * terminal root — the update is guarded by `forked = false` and excludes
+ * already-terminal states.
  */
-async function updateState(coordinationId, state, terminal, forked) {
+async function updateState(coordinationId, state) {
   const db = supabase();
-  const updates = { state };
-  if (forked !== undefined) updates.forked = forked;
   const { error } = await db.from('coordination_roots')
-    .update(updates)
-    .eq('coordination_id', coordinationId);
+    .update({ state })
+    .eq('coordination_id', coordinationId)
+    .eq('forked', false);
   if (error) throw new Error(`[coordination] updateState failed: ${error.message}`);
 }
 
@@ -134,7 +161,6 @@ module.exports = {
   storeRoot,
   getRoot,
   storeAction,
-  listActions,
   getOrderedChain,
   updateState,
 };

@@ -635,6 +635,18 @@ app.post(path.join(PREFIX, 'coordination', 'root'), requireBackend, requireNostr
       return res.status(400).json({ error: 'root validation failed', errors: rootResult.errors });
     }
 
+    // Escrow-service binding: the bound core/escrow pubkey MUST be this
+    // service's operator pubkey, preventing spoofed coordinations that
+    // name an unrelated escrow authority.
+    const escrowPubkey = rootResult.root.roleMap['core/escrow']?.[0];
+    if (config.OPERATOR_PUBKEY && escrowPubkey !== config.OPERATOR_PUBKEY) {
+      return res.status(403).json({
+        error: 'the bound core/escrow pubkey does not match this service\'s OPERATOR_PUBKEY',
+        bound: escrowPubkey,
+        expected: config.OPERATOR_PUBKEY,
+      });
+    }
+
     // Extract escrow descriptor references from tags.
     const eEscrow = (event.tags || []).find((t) => t[0] === 'e' && t[3] === 'escrow-version');
     const aEscrow = (event.tags || []).find((t) => t[0] === 'a' && t[3] === 'escrow');
@@ -679,45 +691,54 @@ app.post(path.join(PREFIX, 'coordination', 'action'), requireBackend, requireNos
     }
 
     const expectedPrev = rootRow.chain_tip || coordinationId;
-    const actResult = pip02.validateAction(event, {
-      eventId: rootRow.coordination_id,
-      pubkey: rootRow.event_pubkey,
-      createdAt: Math.floor(new Date(rootRow.created_at).getTime() / 1000),
-      roleMap: (() => {
-        const map = {};
-        for (const tag of rootRow.raw_event.tags) {
-          if (tag[0] === 'p') {
-            const role = tag[3];
-            if (!map[role]) map[role] = [];
-            map[role].push(tag[1]);
-          }
-        }
-        return map;
-      })(),
-      content: rootRow.content,
-    }, expectedPrev);
 
+    // Use the validated root from pip02.validateRoot to avoid hand-rolled
+    // roleMap reconstruction with weaker validation.
+    const rootParsed = pip02.validateRoot(rootRow.raw_event, swapProfile);
+    if (!rootParsed.valid) {
+      return res.status(500).json({ error: 'stored root is invalid', errors: rootParsed.errors });
+    }
+
+    const actResult = pip02.validateAction(event, rootParsed.root, expectedPrev);
     if (!actResult.valid) {
       return res.status(400).json({ error: 'action validation failed', errors: actResult.errors });
     }
 
-    const prevRef = (event.tags || []).find((t) => t[0] === 'e' && t[3] === 'prev');
-    await coordination.storeAction(event, {
-      coordinationId,
-      actionType: actResult.action.actionType,
-      prevId: prevRef?.[1] ?? expectedPrev,
-      content: actResult.action.content,
-      data: actResult.action.data,
-    });
-
-    // Re-derive the full state by replaying the chain.
+    // Validate-before-persist: simulate the chain with the candidate action
+    // appended and reject if the action fails authorization or invariants.
+    // This prevents chain poisoning by unauthorized actions.
     const chain = await coordination.getOrderedChain(coordinationId);
-    const rootParsed = pip02.validateRoot(rootRow.raw_event, swapProfile);
     const actionEvents = chain.actions.map((a) => a.raw_event);
+    actionEvents.push(event); // candidate action
     const stateResult = pip02.validateChain(rootRow.raw_event, actionEvents, swapProfile);
 
+    if (!stateResult.valid) {
+      return res.status(400).json({
+        error: 'action rejected by kernel invariants or authorization',
+        errors: stateResult.errors,
+        state: stateResult.state,
+      });
+    }
+
+    // Persist only after validation passes.
+    const prevRef = (event.tags || []).find((t) => t[0] === 'e' && t[3] === 'prev');
+    try {
+      await coordination.storeAction(event, {
+        coordinationId,
+        actionType: actResult.action.actionType,
+        prevId: prevRef?.[1] ?? expectedPrev,
+        content: actResult.action.content,
+        data: actResult.action.data,
+      });
+    } catch (storeErr) {
+      // The unique constraint on (coordination_id, prev_id) or the
+      // compare-and-set tip update detected a concurrent action / fork.
+      return res.status(409).json({ error: storeErr.message });
+    }
+
+    // Update the derived state on the root (guarded against forked roots).
     if (stateResult.valid) {
-      await coordination.updateState(coordinationId, stateResult.state, stateResult.terminal, stateResult.forked);
+      await coordination.updateState(coordinationId, stateResult.state);
     }
 
     res.json({

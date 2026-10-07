@@ -17,7 +17,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const { bech32 } = require('@scure/base');
 const { secp256k1, schnorr } = require('@noble/curves/secp256k1');
 const { sha256 } = require('@noble/hashes/sha256');
 const { config } = require('../config/env');

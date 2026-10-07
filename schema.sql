@@ -323,6 +323,15 @@ create index if not exists idx_coord_actions_root    on public.coordination_acti
 create index if not exists idx_coord_actions_prev     on public.coordination_actions (prev_id);
 create index if not exists idx_coord_actions_type     on public.coordination_actions (action_type);
 
+-- Fork detection: at most one action may extend any given predecessor within
+-- a coordination. A unique constraint on (coordination_id, prev_id) makes the
+-- second concurrent insert fail, which the caller interprets as a fork.
+-- The trigger below marks the root as forked for the first successful insert
+-- if a sibling is later found (e.g. via a delayed retry). The unique
+-- constraint is the primary race-safe mechanism.
+create unique index if not exists idx_coord_actions_prev_unique
+    on public.coordination_actions (coordination_id, prev_id);
+
 -- Fork detection: if two actions share the same prev_id for one root,
 -- the coordination is forked. This trigger marks the root as forked.
 create or replace function public.detect_coordination_fork()
